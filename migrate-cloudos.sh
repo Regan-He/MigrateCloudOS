@@ -35,30 +35,35 @@ if [ $((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1])) -lt 402 ]; then
     exit 1
 fi
 
+# enable extended globbing
 shopt -s extglob
 
-# Path to logfile
-logfile=/var/log/migrate8to9.log
+# logfile name, save up to 10
+declare -r logfile="/var/log/migrate8to9.log"
+declare -ri maxlog_num=10
 
-# Rotate old logs
-numlogs=5
-if [[ -e $logfile ]]; then
-    # Here we use mv before bin_check, so simply check the exit status to see if
-    # it worked.
+function rotate_logfile() {
+    if [[ ! -e $logfile ]]; then
+        return
+    fi
+
+    local err_message="Unable to rotate logfiles, continuing without rotation."
+
     if ! mv -f "$logfile" "$logfile.0"; then
-        printf '%s\n' "Unable to rotate logfiles, continuing without rotation." >&2
+        echo >&2 "${err_message}"
     else
-        for ((i = numlogs; i > 0; i--)); do
+        for ((i = maxlog_num; i > 0; i--)); do
             if [[ -e "$logfile.$((i - 1))" ]]; then
                 if ! mv -f "$logfile.$((i - 1))" "$logfile.$i"; then
-                    printf '%s\n' \
-                        "Unable to rotate logfiles, continuing without rotation."
+                    echo >&2 "${err_message}"
                     break
                 fi
             fi
         done
     fi
-fi
+}
+
+rotate_logfile
 
 # Send all output to the logfile as well as stdout.
 # After the following we get:
