@@ -1,30 +1,29 @@
 #!/usr/bin/bash
 #shellcheck shell=bash
 
-# get script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-declare -r SCRIPT_DIR
+SCRIPT_NAME=$(basename "${BASH_SOURCE[0]}")
+# 获取脚本路径，用于定位同路径其他功能性脚本
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck disable=SC2034
+declare -r SCRIPT_PATH SCRIPT_NAME
 
-if [ ! -f "${SCRIPT_DIR:?}/logger.sh" ]; then
-    echo >&2 "logger.sh not found. Please run the script from the same directory as logger.sh"
-    exit 1
-fi
-
-# the executor must have root privileges
+# 脚本必须以root身份启动
 if ((EUID != 0)); then
     echo >&2 "You must run this script as root. Either use sudo or 'su -c ${0}'" >&2
     exit 1
 fi
 
-# Run the script in an English environment.
-if ! localectl list-locales | grep -q en_US.UTF-8; then
-    echo >&2 "en_US.UTF-8 not found. Please install the glibc-langpack-en."
+# 需要在C.UTF-8模式下运行，以保证可以正确记录过程中所有输出的信息
+if ! localectl list-locales | grep -qE '^C.UTF-8'; then
+    echo >&2 "C.UTF-8 not found."
     exit 1
 fi
 
-export LANG=en_US.UTF-8
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+unset LANGUAGE
 
-# check BASH version, associative arrays is available in bash 4.2+
+# 需要使用关联数组功能，这要求bash版本不低于4.2，在CloudOS8中是满足的
 if [ -z "$BASH_VERSION" ]; then
     echo >&2 "BASH_VERSION not set. Please run the script with bash."
     exit 1
@@ -35,133 +34,163 @@ if [ $((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1])) -lt 402 ]; then
     exit 1
 fi
 
-# enable extended globbing
+# 启用扩展glob功能
 shopt -s extglob
 
-# logfile name, save up to 10
-declare -r logfile="/var/log/migrate8to9.log"
-declare -ri maxlog_num=10
+# 日志文件定义，最多保存10份以前的日志
+declare -r LOG_FILE="/var/log/migrate8to9.log"
+declare -ri MAXLOG_NUM=10
+# 这是一条需要复用的日志输出内容，使用一个变量临时保存
+err_message="Unable to rotate logfiles, continuing without rotation."
+if ! mv -f "$LOG_FILE" "$LOG_FILE.0"; then
+    echo >&2 "${err_message}"
+else
+    for ((i = MAXLOG_NUM; i > 0; i--)); do
+        if [[ -e "$LOG_FILE.$((i - 1))" ]]; then
+            if ! mv -f "$LOG_FILE.$((i - 1))" "$LOG_FILE.$i"; then
+                echo >&2 "${err_message}"
+                break
+            fi
+        fi
+    done
+fi
+unset err_message
 
-function rotate_logfile() {
-    if [[ ! -e $logfile ]]; then
+# 定义日志输出函数
+declare -rA logger_color=(
+    ["OK"]=2
+    ["FATAL"]=160
+    ["ERROR"]=1
+    ["WARNING"]=9
+    ["INFO"]=5
+    ["DEBUG"]=195
+)
+
+function print2stdout() {
+    local -i color_code=$1
+    shift 1
+    printf '\e[48;5;%dm%s\e[0m \n' "${color_code}" "${*}"
+}
+
+function print2logfile() {
+    if [ -z "${LOG_FILE}" ]; then
         return
     fi
+    local -r message="$*"
+    local -r log_file="/tmp/logger.log"
+    printf '%s\n' "${message}" >>"${log_file}"
+}
 
-    local err_message="Unable to rotate logfiles, continuing without rotation."
-
-    if ! mv -f "$logfile" "$logfile.0"; then
-        echo >&2 "${err_message}"
+function process_logger() {
+    local color_code="$1"
+    shift 1
+    local message_timestamp
+    message_timestamp="$(date '+%Y-%m-%d %H:%M:%S').$(date '+%N' | cut -c -3)"
+    local output_message=""
+    if [ "$#" -gt 0 ]; then
+        output_message="${message_timestamp} | [${color_code}] | $*"
+        print2stdout "${logger_color["${color_code}"]}" "${output_message}"
+        print2logfile "${output_message}"
     else
-        for ((i = maxlog_num; i > 0; i--)); do
-            if [[ -e "$logfile.$((i - 1))" ]]; then
-                if ! mv -f "$logfile.$((i - 1))" "$logfile.$i"; then
-                    echo >&2 "${err_message}"
-                    break
-                fi
-            fi
-        done
+        printf '\n'
     fi
 }
 
-rotate_logfile
-
-# Send all output to the logfile as well as stdout.
-# After the following we get:
-# Output to 1 goes to stdout and the logfile.
-# Output to 2 goes to stderr and the logfile.
-# Output to 3 just goes to stdout.
-# Output to 4 just goes to stderr.
-# Output to 5 just goes to the logfile.
-
-# shellcheck disable=SC2094
-exec \
-    3>&1 \
-    4>&2 \
-    5>>"$logfile" \
-    > >(tee -a "$logfile") \
-    2> >(tee -a "$logfile" >&2)
-
-# List nocolor last here so that -x doesn't bork the display.
-errcolor=$(tput setaf 1)
-infocolor=$(tput setaf 6)
-nocolor=$(tput op)
-
-# Single arg just gets returned verbatim, multi arg gets formatted via printf.
-# First arg is the name of a variable to store the results.
-msg_format() {
-    local _var
-    _var="$1"
-    shift
-    if (($# > 1)); then
-        # shellcheck disable=SC2059
-        printf -v "$_var" "$@"
-    else
-        printf -v "$_var" "%s" "$1"
-    fi
+function logger_ok() {
+    process_logger "OK" "${@}"
 }
 
-# Send an info message to the log file and stdout (with color)
-infomsg() {
-    local msg
-    msg_format msg "$@"
-    printf '%s' "$msg" >&5
-    printf '%s%s%s' "$infocolor" "$msg" "$nocolor" >&3
+function logger_fatal() {
+    process_logger "FATAL" "${@}"
 }
 
-# Send an error message to the log file and stderr (with color)
-errmsg() {
-    local msg
-    msg_format msg "$@"
-    printf '%s' "$msg" >&5
-    printf '%s%s%s' "$errcolor" "$msg" "$nocolor" >&4
+function logger_error() {
+    process_logger "ERROR" "${@}"
 }
 
-infomsg 'migrate2rocky9 - Begin logging at %(%c)T.\n\n' -1
+function logger_warning() {
+    process_logger "WARNING" "${@}"
+}
 
-export LC_ALL=C.UTF-8
-unset LANGUAGE
+function logger_info() {
+    process_logger "INFO" "${@}"
+}
+
+function logger_debug() {
+    process_logger "DEBUG" "${@}"
+}
+
+function error_exit() {
+    logger_error "$@"
+    final_message
+    exit 1
+}
+
+function final_message() {
+    logger_error "An error occurred while we were attempting to upgrade your system to" \
+        "openCloud OS 9. Your system may be unstable. Script will now exit to" \
+        "prevent possible damage."
+    finish_print
+}
+
+function finish_print() {
+    print2stdout "${logger_color["INFO"]}" "A log of this installation can be found at $LOG_FILE"
+}
+
+# 正式开始迁移工作
+logger_info "MigrateCloudOS 8to9 - Begin logging at $(date +'%c')."
+# 启用空字符串匹配功能
 shopt -s nullglob
+# 禁用 bash 中设置的 CDPATH 环境变量
+unset CDPATH
 
-SUPPORTED_MAJOR="9"
+# 支持的系统版本是 openCloudOS 8
+SUPPORTED_MAJOR="8"
+# TODO 确认这是什么值
 SUPPORTED_PLATFORM="platform:el$SUPPORTED_MAJOR"
 ARCH=$(arch)
 
-gpg_key_url="https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9"
-gpg_key_sha512="ead288baa8daad12d6f340f1a392d47413f8614425673fe310e82d4ead94ca15eb2e1329b30389e6a7f93dd406da255df410306cffd7a1a24f0dfb4c8e23fbfe"
+# FIXME 更新这个值
+declare -r GPG_KEY_URL="https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9"
+# FIXME 更新这个值
+declare -r GPG_KEY_SHA512="ead288baa8daad12d6f340f1a392d47413f8614425673fe310e82d4ead94ca15eb2e1329b30389e6a7f93dd406da255df410306cffd7a1a24f0dfb4c8e23fbfe"
 
+# TODO 这是红帽的订阅管理平台通信证书，CloudOS应该已经移除了，但是还是要确认一下
 sm_ca_dir=/etc/rhsm/ca
 unset tmp_sm_ca_dir
 
-# all repos must be signed with the same key given in $gpg_key_url
+# 所有的仓库需要确保 rpm 包都可以使用 $GPG_KEY_URL 进行签名验证
 declare -A repo_urls
 repo_urls=(
-    [rockybaseos]="https://dl.rockylinux.org/pub/rocky/${SUPPORTED_MAJOR}/BaseOS/$ARCH/os/"
-    [rockyappstream]="https://dl.rockylinux.org/pub/rocky/${SUPPORTED_MAJOR}/AppStream/$ARCH/os/"
+    # FIXME 需要更新 URL
+    ["cloudosbaseos"]="https://dl.rockylinux.org/pub/rocky/${SUPPORTED_MAJOR}/BaseOS/$ARCH/os/"
+    ["cloudosappstream"]="https://dl.rockylinux.org/pub/rocky/${SUPPORTED_MAJOR}/AppStream/$ARCH/os/"
 )
 
-# These are additional packages that should always be installed.
-# (currently blank, but we add to it for an EFI boot system).
+# 可能有一些需要额外安装的软件包，在这里列出来
 always_install=()
 
-# The repos package for CentOS stream requires special handling.
+# 流仓库软件包需要特殊处理
 declare -g -A stream_repos_pkgs
 stream_repos_pkgs=(
+    # FIXME
     [rocky - repos]=centos-stream-repos
     [epel - release]=epel-next-release
 )
 
-# Map for package name suffix for shim/grub2-efi
-# on x86_64: grub2-efi-x64, shim-x64
-# on aarch64: grub2-efi-aa64, shim-aa64
-declare -A cpu_arch_suffix_map=(
-    [x86_64]=x64
-    [aarch64]=aa64
+# | 架构    | grub2-efi      | shim      |
+# | ------- | -------------- | --------- |
+# | x86_64  | grub2-efi-x64  | shim-x64  |
+# | aarch64 | grub2-efi-aa64 | shim-aa64 |
+declare -A CPU_ARCH_SUFFIX_MAPPING=(
+    ["x86_64"]=x64
+    ["aarch64"]=aa64
 )
 
-# Prefix to add to CentOS stream repo names when renaming them.
-stream_prefix=stream-
+# 重命名时添加在 openCloud OS 流仓库文件的前缀
+STREAM_PREFIX_STR="stream-"
 
-# Always replace these stream packages with their Rocky Linux equivalents.
+# TODO Always replace these stream packages with their Rocky Linux equivalents.
 stream_always_replace=(
     fwupdate\*
     grub2-\*
@@ -170,147 +199,98 @@ stream_always_replace=(
     kernel-\*
 )
 
-# Directory to required space in MiB
-# Note this is based on Rocky Linux 8 numbers. We will use these until we can
-# get realistic numbers for Rocky 9.
-declare -A dir_space_map
-dir_space_map=(
+# 这些目录需要预留有这么大的空间，单位是 MiB
+declare -A DIR_SPACE_MAPPING
+DIR_SPACE_MAPPING=(
     ["/usr"]=250
     ["/var"]=1536
     ["/boot"]=50
 )
 
-unset CDPATH
-
-exit_message() {
-    errmsg $'\n'"$1"$'\n\n'
-    final_message
-    exit 1
-}
-
-final_message() {
-    errmsg '%s ' \
-        "An error occurred while we were attempting to convert your system to" \
-        "Rocky Linux. Your system may be unstable. Script will now exit to" \
-        "prevent possible damage."$'\n\n'
-    logmessage
-}
-
-logmessage() {
-    printf '%s%s%s\n' "$infocolor" \
-        "A log of this installation can be found at $logfile" \
-        "$nocolor" >&3
-}
-
-# This just grabs a field from os-release and returns it.
-os-release() (
+# 检查 os-release 中是否存在必要的字段，如果存在，则返回字段值，否则返回 1
+# 使用 () 定义函数而不是 {} 定义函数，以确保从 os-release 导出的环境变量，不会影响全局
+function linux_dist_info() (
     # shellcheck source=/dev/null
     . /etc/os-release
-    if ! [[ ${!1} ]]; then
-        return 1
-    fi
-    printf '%s\n' "${!1}"
+    [[ -z ${!1} ]] && return 1
+    echo "${!1}"
 )
 
-# Check the version of a package against a supplied version number. Note that
-# this uses sort -V to compare the versions which isn't perfect for rpm package
-# versions, but to do a proper comparison we would need to use rpmdev-vercmp in
-# the rpmdevtools package which we don't want to force-install. sort -V should
-# be adequate for our needs here.
-pkg_ver() (
-    ver=$(rpm -q --qf '%{VERSION}\n' "$1") || return 2
-    if [[ $(sort -V <<<"$ver"$'\n'"$2" | head -1) != "$2" ]]; then
-        return 1
-    fi
-    return 0
-)
-
-# Set up a temporary directory.
-pre_setup() {
+# 创建一个临时工作目录
+function pre_setup() {
     if ! tmp_dir=$(mktemp -d) || [[ ! -d "$tmp_dir" ]]; then
-        exit_message "Error creating temp dir"
+        error_exit "Error creating temp dir"
     fi
-    # failglob makes pathname expansion fail if empty, dotglob adds files
-    # starting with . to pathname expansion
+    # 使用 failglob 和 dotglob 检测目录是否为空，如果目录中有任何文件存在，都会导致if失败
     if (
         shopt -s failglob dotglob
         : "$tmp_dir"/*
     ) 2>/dev/null; then
-        exit_message "Temp dir not empty"
+        error_exit "Temp dir not empty"
+    fi
+
+    declare -rg TMP_DIR="${tmp_dir}"
+}
+
+# 清理函数，用于清理临时工作目录
+function exit_clean() {
+    if [[ -d "$TMP_DIR" ]]; then
+        rm -rf "$TMP_DIR"
+    fi
+    if [[ -f "$CONTAINER_MACROS" ]]; then
+        rm -f "$CONTAINER_MACROS"
     fi
 }
 
-# Cleanup function gets rid of the temporary directory.
-exit_clean() {
-    if [[ -d "$tmp_dir" ]]; then
-        rm -rf "$tmp_dir"
-    fi
-    if [[ -f "$container_macros" ]]; then
-        rm -f "$container_macros"
-    fi
-}
+function pre_check() {
+    # TODO: 检查环境特征，必须是 openCloudOS
+    : something
 
-pre_check() {
-    if [[ -e /etc/rhsm/ca/katello-server-ca.pem ]]; then
-        # shellcheck disable=SC2026
-        exit_message \
-            'Migration from Katello-modified systems is not supported by migrate2rocky9. ''See the README file for details.'
-    fi
-    if [[ -e /etc/salt/minion.d/susemanager.conf ]]; then
-        # shellcheck disable=SC2026
-        exit_message \
-            'Migration from Uyuni/SUSE Manager-modified systems is not supported by ''migrate2rocky9. See the README file for details.'
+    if ! dnf -y check; then
+        error_exit "Errors found in dnf/rpm database. Please correct before running ${SCRIPT_NAME}"
     fi
 
-    dnf -y check || exit_message \
-        'Errors found in dnf/rpm database. Please correct before running ''migrate2rocky9.'
-
-    # Get available space to compare to requirements.
-    # If the stock kernel is not installed we don't require space in /boot
+    # 如果当前环境中没有安装内核（docker容器、chroot环境），则忽略 /boot 需要的空间
     if ! rpm -q --quiet kernel; then
-        dir_space_map["/boot"]=0
+        DIR_SPACE_MAPPING["/boot"]=0
     fi
-    local -a errs dirs=("${!dir_space_map[@]}")
+
+    local -a errs dirs=("${!DIR_SPACE_MAPPING[@]}")
     local dir mount avail i=0
     local -A mount_avail_map mount_space_map
     while read -r mount avail; do
-        if [[ $mount == 'Filesystem' ]]; then
+        if [[ "${mount}" == 'Filesystem' ]]; then
             continue
         fi
 
-        dir=${dirs[$((i++))]}
-
-        mount_avail_map[$mount]=${avail%M}
-        ((mount_space_map[$mount] += dir_space_map[$dir]))
+        dir="${dirs["$((i++))"]}"
+        # 去除 df 查询的空间显示最后面的单位 M
+        mount_avail_map["${mount}"]="${avail%M}"
+        ((mount_space_map["${mount}"] += DIR_SPACE_MAPPING["${dir}"]))
     done < <(df -BM --output=source,avail "${dirs[@]}")
 
     for mount in "${!mount_space_map[@]}"; do
-        ((avail = mount_avail_map[$mount] * 95 / 100))
-        if ((avail < mount_space_map[$mount])); then
-            errs+=("Not enough space in $mount, ${mount_space_map[$mount]}M required, ${avail}M available.")
+        ((avail = mount_avail_map["${mount}"] * 95 / 100))
+        if ((avail < mount_space_map["${mount}"])); then
+            errs+=("Not enough space in ${mount}, ${mount_space_map[${mount}]}M required, ${avail}M available.")
         fi
     done
 
     if ((${#errs[@]})); then
-        IFS=$'\n'
-        exit_message "${errs[*]}"
+        error_exit "${errs[*]}"
     fi
 }
 
-# All of the binaries used by this script are available in a EL9 minimal install
-# and are in /bin, so we should not encounter a system where the script doesn't
-# work unless it's severely broken. This is just a simple check that will cause
-# the script to bail if any expected system utilities are missing.
-bin_check() {
-    # Check the platform.
-    if [[ $(os-release PLATFORM_ID) != "$SUPPORTED_PLATFORM" ]]; then
-        # shellcheck disable=SC2026
-        exit_message \
-            'This script must be run on an EL9 distribution. Migration from other ''distributions is not supported.'
+# 脚本所需的命令都在 openCloud OS 8 的最小安装中，所有必须的二进制都在 /bin 目录中
+# 除非运行环境本身已经损坏，否则迁移脚本在这里不会失败。
+function bin_check() {
+    # 我们仅支持升级 openCloud OS 8 到 openCloud OS 9
+    if [[ $(linux_dist_info PLATFORM_ID) != "$SUPPORTED_PLATFORM" ]]; then
+        error_exit 'This script must be run on an EL9 distribution. Migration from other distributions is not supported.'
     fi
 
-    local -a missing bins
-    bins=(
+    local -a missing
+    local -a bins=(
         rpm dnf awk column tee tput mkdir cat arch sort uniq rmdir df
         rm head curl sha512sum mktemp systemd-detect-virt sed grep
     )
@@ -318,61 +298,61 @@ bin_check() {
         bins+=(findmnt grub2-mkconfig efibootmgr mokutil lsblk)
     fi
     for bin in "${bins[@]}"; do
-        if ! type "$bin" >/dev/null 2>&1; then
+        if ! type "$bin" &>/dev/null; then
             missing+=("$bin")
         fi
     done
 
     local -A pkgs
     pkgs=(
-        [dnf]=4.2
-        [dnf - plugins - core]=0
+        ["dnf"]=4.2
+        ["dnf-plugins-core"]=0
+    )
+
+    # 比较新老版本的版本号，现在使用 sort -V 进行版本检查
+    function pkg_ver() (
+        _ver=$(rpm -q --qf '%{VERSION}\n' "$1") || return 2
+        if [[ $(sort -V <<<"${_ver}"$'\n'"$2" | head -1) != "$2" ]]; then
+            return 1
+        fi
+        return 0
     )
 
     for pkg in "${!pkgs[@]}"; do
         ver=${pkgs[$pkg]}
         if ! pkg_ver "$pkg" "$ver"; then
-            # shellcheck disable=SC2140
-            exit_message \
-                "$pkg >= $ver is required for this script. Please run ""\
-\"dnf install $pkg; dnf update\" first."
+            error_exit "$pkg >= $ver is required for this script. Please run 'dnf install $pkg; dnf update' first."
         fi
     done
 
     if ((${#missing[@]})); then
-        # shellcheck disable=SC2140
-        exit_message \
-            "Commands not found: ${missing[*]}. Possible bad PATH setting or corrupt ""\
-installation."
+        error_exit "Commands not found: ${missing[*]}. Possible bad PATH setting or corrupt installation."
     fi
 }
 
-# This function will overwrite the repoquery_results associative array with the
-# info for the resulting package. Note that we explicitly disable the epel repo
-# as a special-case below to avoid having the extras repository map to epel.
-repoquery() {
+# 禁用 epel 仓库以避免 extras 仓库错误映射
+function repoquery() {
     local name val prev result
+    # TODO 检查是否有 epel 仓库
     result=$(safednf -y -q "${dist_repourl_swaps[@]}" \
         --setopt=epel.excludepkgs=epel-release repoquery -i "$1") ||
-        exit_message "Failed to fetch info for package $1."
-    if ! [[ $result ]]; then
-        # We didn't match this package, the repo could be disabled.
+        error_exit "Failed to fetch info for package $1."
+    if ! [[ ${result} ]]; then
+        # 没有查询到任何信息
         return 1
     fi
     declare -gA repoquery_results=()
     while IFS=" :" read -r name val; do
-        if [[ -z $name ]]; then
-            repoquery_results[$prev]+=" $val"
+        if [[ -z "${name}" ]]; then
+            repoquery_results["${prev}"]+=" $val"
         else
-            prev=$name
-            repoquery_results[$name]=$val
+            prev="${name}"
+            repoquery_results["${name}"]="${val}"
         fi
-    done <<<"$result"
+    done <<<"${result}"
 }
 
-# This function will overwrite the repoinfo_results associative array with the
-# info for the resulting repository.
-_repoinfo() {
+function _repoinfo() {
     local name val result
     result=$(
         safednf -y -q --repo="$1" "${dist_repourl_swaps[@]}" repoinfo "$1"
@@ -383,54 +363,48 @@ _repoinfo() {
     fi
     declare -gA repoinfo_results=()
     while IFS=" :" read -r name val; do
-        if [[ ! ($name || $val) ]]; then
+        if [[ ! ("${name}" || "${val}") ]]; then
             continue
         fi
-        if [[ -z $name ]]; then
-            repoinfo_results[$prev]+=" $val"
+        if [[ -z "${name}" ]]; then
+            repoinfo_results["${prev}"]+=" ${val}"
         else
-            prev=$name
-            repoinfo_results[$name]=$val
+            prev="${name}"
+            repoinfo_results["${name}"]="${val}"
         fi
-    done <<<"$result"
+    done <<<"${result}"
 
     # Set the enabled state
-    if [[ ! ${enabled_repo_check[$1]} ]]; then
-        repoinfo_results[Repo - status]=disabled
+    if [[ ! "${enabled_repo_check["$1"]}" ]]; then
+        repoinfo_results["Repo-status"]="disabled"
     fi
 
-    # dnf repoinfo doesn't return the gpgkey, but we need that so we have to get
-    # it from the repo file itself.
-    # "end_of_file" is a hack here. Since it is not a valid dnf setting we know
-    # it won't appear in a .repo file on a line by itself, so it's safe to
-    # search for the string to make the awk parser look all the way to the end
-    # of the file.
     # shellcheck disable=SC2154
-    repoinfo_results[Repo - gpgkey]=$(
+    repoinfo_results["Repo-gpgkey"]=$(
         awk '
-            $0=="['"${repoinfo_results[Repo - id]}"']",$0=="end_of_file" {
+            $0=="['"${repoinfo_results["Repo-id"]}"']",$0=="end_of_file" {
                 if (l++ < 1) {next}
                 else if (/^\[.*\]$/) {nextfile}
                 else if (sub(/^gpgkey\s*=\s*file:\/\//,"")) {print; nextfile}
                 else {next}
             }
-        ' <"${repoinfo_results[Repo - filename]}"
+        ' <"${repoinfo_results["Repo-filename"]}"
     )
 
     # Add an indicator of whether this is a subscription-manager managed
     # repository.
     # shellcheck disable=SC2154
-    repoinfo_results[Repo - managed]=$(
+    repoinfo_results["Repo-managed"]=$(
         awk '
             BEGIN {FS="[)(]"}
             /^# Managed by \(.*\) subscription-manager$/ {print $2}
-        ' <"${repoinfo_results[Repo - filename]}"
+        ' <"${repoinfo_results["Repo-filename"]}"
     )
 }
 
 # We now store the repoinfo results in a cache.
 declare -g -A repoinfo_results_cache=()
-repoinfo() {
+function repoinfo() {
     local k
     if [[ ! ${repoinfo_results_cache[$1]} ]]; then
         _repoinfo "$@" || return
@@ -467,7 +441,7 @@ provides_pkg() (
         pkg=$(
             safednf -y -q "${dist_repourl_swaps[@]}" repoquery \
                 --queryformat '%{NAME}\n' "$provides"
-        ) || exit_message "Can't get package name for $provides."
+        ) || error_exit "Can't get package name for $provides."
     printf '%s\n' "$pkg"
 )
 
@@ -502,22 +476,24 @@ safednf() (
 # is considered bad. In any of these cases we'll end up replacing the repourl
 # with a good one from our mirror of CentOS vault.
 #
-check_repourl() {
+function check_repourl() {
     repoinfo "$1" || return
-    if [[ ! ${repoinfo_results[Repo - baseurl]} ]]; then
+    if [[ ! ${repoinfo_results["Repo - baseurl"]} ]]; then
         return 1
     fi
 
     local -a urls
-    IFS=, read -r -a urls <<<"${repoinfo_results[Repo - baseurl]}"
-    local u
-    for u in "${urls[@]##*( )}"; do
+    IFS=, read -r -a urls <<<"${repoinfo_results["Repo - baseurl"]}"
+    local u url
+    for url in "${urls[@]}"; do
+        # FIXME: 这里要做个什么事？
+        u="${url}"
         curl -sfLI "${u%% *}repodata/repomd.xml" >/dev/null && return
     done
     return "$(($? ? $? : 1))"
 }
 
-collect_system_info() {
+function collect_system_info() {
     # Dump the DNF cache first so we start with a clean slate.
     infomsg $'\nRemoving dnf cache\n'
     rm -rf /var/cache/{yum,dnf}
@@ -528,7 +504,7 @@ collect_system_info() {
         declare -g -a efi_disk efi_partition
         efi_mount=$(findmnt --mountpoint /boot/efi --output SOURCE \
             --noheadings) ||
-            exit_message "Can't find EFI mount. No EFI  boot detected."
+            error_exit "Can't find EFI mount. No EFI  boot detected."
         kname=$(lsblk -dno kname "$efi_mount")
         efi_disk=("$(lsblk -dno pkname "/dev/$kname")")
 
@@ -539,13 +515,13 @@ collect_system_info() {
             # to dig a little deeper to find the actual physical disks and
             # partitions.
             kname=$(lsblk -dno kname "$efi_mount")
-            cd "/sys/block/$kname/slaves" || exit_message \
+            cd "/sys/block/$kname/slaves" || error_exit \
                 "Unable to gather EFI data: Can't cd to /sys/block/$kname/slaves."
             if ! (
                 shopt -s failglob
                 : ./*
             ) 2>/dev/null; then
-                exit_message \
+                error_exit \
                     "Unable to gather EFI data: No slaves found in /sys/block/$kname/slaves."
             fi
             efi_disk=()
@@ -553,7 +529,7 @@ collect_system_info() {
                 efi_disk+=("$(lsblk -dno pkname "/dev/$d")")
                 efi_partition+=("$(<"$d/partition")")
                 if [[ ! ${efi_disk[-1]} || ! ${efi_partition[-1]} ]]; then
-                    exit_message \
+                    error_exit \
                         "Unable to gather EFI data: Can't find disk name or partition number for $d."
                 fi
             done
@@ -563,8 +539,8 @@ collect_system_info() {
         # We need to make sure that these packages are always installed in an
         # EFI system.
         always_install+=(
-            "shim-${cpu_arch_suffix_map[$ARCH]}"
-            "grub2-efi-${cpu_arch_suffix_map[$ARCH]}"
+            "shim-${CPU_ARCH_SUFFIX_MAPPING[$ARCH]}"
+            "grub2-efi-${CPU_ARCH_SUFFIX_MAPPING[$ARCH]}"
         )
     fi
 
@@ -598,13 +574,13 @@ collect_system_info() {
         #        [devel]=quota-devel.$ARCH
     )
 
-    dist_id=$(os-release ID)
+    dist_id=$(linux_dist_info ID)
     # We need a different dist ID for CentOS Linux vs CentOS Stream
     if [[ $dist_id == centos ]] && rpm --quiet -q centos-stream-release; then
         dist_id+=-stream
     fi
 
-    PRETTY_NAME=$(os-release PRETTY_NAME)
+    PRETTY_NAME=$(linux_dist_info PRETTY_NAME)
     infomsg '%s' \
         "Preparing to migrate $PRETTY_NAME to Rocky Linux 9."$'\n\n'
 
@@ -673,7 +649,7 @@ collect_system_info() {
     # rocky-repos package will get installed.
     for r in "${!repo_map[@]}"; do
         repoinfo "${repo_map[$r]}" ||
-            exit_message "Failed to fetch info for repository ${repo_map[$r]}."
+            error_exit "Failed to fetch info for repository ${repo_map[$r]}."
 
         if [[ $r == "baseos" ]]; then
             local baseos_filename=system-release
@@ -689,7 +665,7 @@ collect_system_info() {
 
     # First get info for the baseos repo
     repoinfo "${repo_map[baseos]}" ||
-        exit_message "Failed to fetch info for repository ${repo_map[baseos]}."
+        error_exit "Failed to fetch info for repository ${repo_map[baseos]}."
 
     declare -g -A pkg_map provides_pkg_map
     declare -g -a addl_provide_removes addl_pkg_removes
@@ -711,7 +687,7 @@ collect_system_info() {
     # Check to make sure that we don't already have a full or partial
     # RockyLinux install.
     if [[ $(rpm -qa "${!provides_pkg_map[@]}") ]]; then
-        exit_message \
+        error_exit \
             $'Found a full or partial RockyLinux install already in place. Aborting\n' \
             $'because continuing with the migration could cause further damage to system.'
     fi
@@ -720,7 +696,7 @@ collect_system_info() {
         printf '.'
         prov=${provides_pkg_map[$pkg]}
         pkg_map[$pkg]=$(provides_pkg "$prov") ||
-            exit_message "Can't get package that provides $prov."
+            error_exit "Can't get package that provides $prov."
     done
     for prov in "${addl_provide_removes[@]}"; do
         printf '.'
@@ -864,9 +840,9 @@ equivalents"
 
 convert_info_dir=/root/convert
 unset convert_to_rocky reinstall_all_rpms verify_all_rpms update_efi \
-    container_macros
+    CONTAINER_MACROS
 
-usage() {
+function usage() {
     printf '%s\n' \
         "Usage: ${0##*/} [OPTIONS]" \
         '' \
@@ -878,7 +854,7 @@ usage() {
     exit 1
 } >&2
 
-generate_rpm_info() {
+function generate_rpm_info() {
     mkdir -p "$convert_info_dir"
     infomsg "Creating a list of RPMs installed: $1"$'\n'
     # shellcheck disable=SC2140
@@ -892,23 +868,23 @@ ${convert_info_dir}/$HOSTNAME-rpm-list-verified-$1.log"
 }
 
 # Run a dnf update before the actual migration.
-pre_update() {
+function pre_update() {
     infomsg '%s\n' "Running dnf update before we attempt the migration."
-    safednf -y "${dist_repourl_swaps[@]}" update || exit_message \
+    safednf -y "${dist_repourl_swaps[@]}" update || error_exit \
         $'Error running pre-update. Stopping now to avoid putting the system in an\n'$'unstable state. Please correct the issues shown here and try again.'
 }
 
-package_swaps() {
+function package_swaps() {
     # Save off any subscription-manager keys, just in case.
     if (
         shopt -s failglob dotglob
         : "$sm_ca_dir"/*
     ) 2>/dev/null; then
-        tmp_sm_ca_dir=$tmp_dir/sm-certs
+        tmp_sm_ca_dir=$TMP_DIR/sm-certs
         mkdir "$tmp_sm_ca_dir" ||
-            exit_message "Could not create directory: $tmp_sm_ca_dir"
+            error_exit "Could not create directory: $tmp_sm_ca_dir"
         cp -f -dR --preserve=all "$sm_ca_dir"/* "$tmp_sm_ca_dir/" ||
-            exit_message "Could not copy certs to $tmp_sm_ca_dir"
+            error_exit "Could not copy certs to $tmp_sm_ca_dir"
     fi
 
     # prepare repo parameters
@@ -933,14 +909,14 @@ package_swaps() {
             # Remove the package from the rpm db.
             saferpm -e --justdb --nodeps -a \
                 "${installed_sys_stream_repos_pkgs[@]}" ||
-                exit_message \
+                error_exit \
                     "Could not remove packages from the rpm db: ${installed_sys_stream_repos_pkgs[*]}"
         fi
 
         # Rename the stream repos with a prefix and fix the baseurl.
         # shellcheck disable=SC2016
         sed -i \
-            -e 's/^\[/['"$stream_prefix"'/' \
+            -e 's/^\[/['"$STREAM_PREFIX_STR"'/' \
             -e 's|^mirrorlist=|#mirrorlist=|' \
             -e 's|^#baseurl=http://mirror.centos.org/$contentdir/$stream/|baseurl=http://mirror.centos.org/centos/9-stream/|' \
             -e 's|^baseurl=http://vault.centos.org/$contentdir/$stream/|baseurl=https://vault.centos.org/centos/9-stream/|' \
@@ -1007,7 +983,7 @@ EOF
         # Get a list of rpm packages to package names
         local -A rpm_map
         local -a file_list
-        for rpm in /var/cache/dnf/{rockybaseos,rockyappstream}-*/packages/*.rpm; do
+        for rpm in /var/cache/dnf/{cloudosbaseos,cloudosappstream}-*/packages/*.rpm; do
             rpm_map[$(
                 rpm -q --qf '%{NAME}\n' --nodigest "$rpm" 2>/dev/null
             )]=$rpm
@@ -1067,37 +1043,37 @@ EOF
     if ((${#disable_modules[@]})); then
         infomsg $'Disabling modules\n\n'
         safednf -y module disable "${disable_modules[@]}" ||
-            exit_message "Can't disable modules ${disable_modules[*]}"
+            error_exit "Can't disable modules ${disable_modules[*]}"
     fi
 
     if ((${#enabled_modules[@]})); then
         infomsg $'Enabling modules\n\n'
         safednf -y module enable "${enabled_modules[@]}" ||
-            exit_message "Can't enable modules ${enabled_modules[*]}"
+            error_exit "Can't enable modules ${enabled_modules[*]}"
     fi
 
     # Make sure that excluded modules are disabled.
     if ((${#module_excludes[@]})); then
         infomsg $'Disabling excluded modules\n\n'
         safednf -y module disable "${module_excludes[@]}" ||
-            exit_message "Can't disable modules ${module_excludes[*]}"
+            error_exit "Can't disable modules ${module_excludes[*]}"
     fi
 
     infomsg $'\nSyncing packages\n\n'
     dnf -y --allowerasing distro-sync ||
-        exit_message "Error during distro-sync."
+        error_exit "Error during distro-sync."
 
     # Disable Stream repos.
     if ((${#installed_sys_stream_repos_pkgs[@]} || ${#installed_stream_repos_pkgs[@]})); then
         dnf -y --enableplugin=config_manager config-manager --set-disabled \
-            "$stream_prefix*" ||
-            errmsg \
-                $'Failed to disable CentOS Stream repos, please check and disable manually.\n'
+            "$STREAM_PREFIX_STR*" ||
+            logger_error \
+                $'Failed to disable CentOS Stream repos, please check and disable manually.'
 
         if ((${#stream_always_replace[@]})) &&
             [[ $(saferpm -qa "${stream_always_replace[@]}") ]]; then
             safednf -y distro-sync "${stream_always_replace[@]}" ||
-                exit_message "Error during distro-sync."
+                error_exit "Error during distro-sync."
         fi
 
         infomsg $'\nCentOS Stream Migration Notes:\n\n'
@@ -1143,7 +1119,7 @@ EOF
     fi
 
     if ((${#always_install[@]})); then
-        safednf -y install "${always_install[@]}" || exit_message \
+        safednf -y install "${always_install[@]}" || error_exit \
             "Error installing required packages: ${always_install[*]}"
     fi
 
@@ -1162,7 +1138,7 @@ EOF
 
         if ((${#removed_certs[@]})); then
             cp -n -dR --preserve=all "$tmp_sm_ca_dir"/* "$sm_ca_dir/" ||
-                exit_message "Could not copy certs back to $sm_ca_dir"
+                error_exit "Could not copy certs back to $sm_ca_dir"
 
             infomsg '%s' \
                 $'Some Subscription Manager certificates ' \
@@ -1180,18 +1156,18 @@ EOF
 
 # Check if this system is running on EFI
 # If yes, we'll need to run fix_efi() at the end of the conversion
-efi_check() {
+function efi_check() {
     # Check if we have /sys mounted and it is looking sane
     if ! [[ -d /sys/class/block ]]; then
-        exit_message "/sys is not accessible."
+        error_exit "/sys is not accessible."
     fi
 
     # Now that we know /sys is reliable, use it to check if we are running on
     # EFI or not
     if systemd-detect-virt --quiet --container; then
-        declare -g container_macros
-        container_macros=$(mktemp /etc/rpm/macros.zXXXXXX)
-        printf '%s\n' '%_netsharedpath /sys:/proc' >"$container_macros"
+        declare -g CONTAINER_MACROS
+        CONTAINER_MACROS=$(mktemp /etc/rpm/macros.zXXXXXX)
+        printf '%s\n' '%_netsharedpath /sys:/proc' >"$CONTAINER_MACROS"
     elif [[ -d /sys/firmware/efi/ ]]; then
         declare -g update_efi
         update_efi=true
@@ -1201,22 +1177,22 @@ efi_check() {
 # Called to update the EFI boot.
 fix_efi() (
     grub2-mkconfig -o /boot/efi/EFI/rocky/grub.cfg ||
-        exit_message "Error updating the grub config."
+        error_exit "Error updating the grub config."
     for i in "${!efi_disk[@]}"; do
         efibootmgr -c -d "/dev/${efi_disk[$i]}" -p "${efi_partition[$i]}" \
-            -L "Rocky Linux" -l "/EFI/rocky/shim${cpu_arch_suffix_map[$ARCH]}.efi" ||
-            exit_message "Error updating uEFI firmware."
+            -L "Rocky Linux" -l "/EFI/rocky/shim${CPU_ARCH_SUFFIX_MAPPING[$ARCH]}.efi" ||
+            error_exit "Error updating uEFI firmware."
     done
 )
 
 # Download and verify the Rocky Linux package signing key
-establish_gpg_trust() {
+function establish_gpg_trust() {
     # create temp dir and verify it is really created and empty, so we are sure
     # deleting it afterwards won't cause any harm
     declare -g gpg_tmp_dir
-    gpg_tmp_dir=$tmp_dir/gpg
+    gpg_tmp_dir=$TMP_DIR/gpg
     if ! mkdir "$gpg_tmp_dir" || [[ ! -d "$gpg_tmp_dir" ]]; then
-        exit_message "Error creating temp dir"
+        error_exit "Error creating temp dir"
     fi
     # failglob makes pathname expansion fail if empty, dotglob adds files
     # starting with . to pathname expansion
@@ -1224,20 +1200,20 @@ establish_gpg_trust() {
         shopt -s failglob dotglob
         : "$gpg_tmp_dir"/*
     ) 2>/dev/null; then
-        exit_message "Temp dir not empty"
+        error_exit "Temp dir not empty"
     fi
 
     # extract the filename from the url, use the temp dir just created
-    declare -g gpg_key_file="$gpg_tmp_dir/${gpg_key_url##*/}"
+    declare -g gpg_key_file="$gpg_tmp_dir/${GPG_KEY_URL##*/}"
 
-    if ! curl -L -o "$gpg_key_file" --silent --show-error "$gpg_key_url"; then
+    if ! curl -L -o "$gpg_key_file" --silent --show-error "$GPG_KEY_URL"; then
         rm -rf "$gpg_tmp_dir"
-        exit_message "Error downloading the Rocky Linux signing key."
+        error_exit "Error downloading the Rocky Linux signing key."
     fi
 
-    if ! sha512sum --quiet -c <<<"$gpg_key_sha512 $gpg_key_file"; then
+    if ! sha512sum --quiet -c <<<"$GPG_KEY_SHA512 $gpg_key_file"; then
         rm -rf "$gpg_tmp_dir"
-        exit_message "Error validating the signing key."
+        error_exit "Error validating the signing key."
     fi
 }
 
@@ -1257,7 +1233,7 @@ while getopts "hrVR" option; do
         verify_all_rpms=true
         ;;
     *)
-        errmsg $'Invalid switch\n'
+        logger_error $'Invalid switch'
         usage
         ;;
     esac
@@ -1297,4 +1273,4 @@ printf '\n\n\n'
 if [[ $convert_to_rocky ]]; then
     infomsg $'\nDone, please reboot your system.\n'
 fi
-logmessage
+finish_print
