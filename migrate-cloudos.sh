@@ -2,7 +2,7 @@
 #shellcheck shell=bash
 
 SCRIPT_NAME=$(basename "${BASH_SOURCE[0]}")
-# 获取脚本路径，用于定位同路径其他功能性脚本
+# 获取脚本路径，用于定位同路径其他功能性脚本或者数据文件
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck disable=SC2034
 declare -r SCRIPT_PATH SCRIPT_NAME
@@ -85,7 +85,7 @@ function process_logger() {
     local color_code="$1"
     shift 1
     local message_timestamp
-    message_timestamp="$(date '+%Y-%m-%d %H:%M:%S').$(date '+%N' | cut -c -3)"
+    message_timestamp="$(date '+%Y-%m-%d %H:%M:%S.%N' | cut -c -23)"
     local output_message=""
     if [ "$#" -gt 0 ]; then
         output_message="${message_timestamp} | [${color_code}] | $*"
@@ -128,7 +128,7 @@ function error_exit() {
 
 function final_message() {
     logger_error "An error occurred while we were attempting to upgrade your system to" \
-        "openCloud OS 9. Your system may be unstable. Script will now exit to" \
+        "OpenCloud OS 9. Your system may be unstable. Script will now exit to" \
         "prevent possible damage."
     finish_print
 }
@@ -144,39 +144,21 @@ shopt -s nullglob
 # 禁用 bash 中设置的 CDPATH 环境变量
 unset CDPATH
 
-# 支持的系统版本是 openCloudOS 8
-SUPPORTED_MAJOR="8"
-# TODO 确认这是什么值
-SUPPORTED_PLATFORM="platform:el$SUPPORTED_MAJOR"
-ARCH=$(arch)
-
-# FIXME 更新这个值
-declare -r GPG_KEY_URL="https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9"
-# FIXME 更新这个值
-declare -r GPG_KEY_SHA512="ead288baa8daad12d6f340f1a392d47413f8614425673fe310e82d4ead94ca15eb2e1329b30389e6a7f93dd406da255df410306cffd7a1a24f0dfb4c8e23fbfe"
-
-# TODO 这是红帽的订阅管理平台通信证书，CloudOS应该已经移除了，但是还是要确认一下
-sm_ca_dir=/etc/rhsm/ca
-unset tmp_sm_ca_dir
-
-# 所有的仓库需要确保 rpm 包都可以使用 $GPG_KEY_URL 进行签名验证
+ARCH="$(arch)"
+# OpenCloudOS-9 更新了 GPG KEY，需要使用新的 KEY 进行验证
+# 这个 key 文件是从 OpenCloudOS-9 的 opencloudos-repos RPM 包中提取出来的
+declare -r GPG_KEY_FILE="${SCRIPT_PATH}/OpenCloud-9-gpgkey/RPM-GPG-KEY-OpenCloudOS-9"
+declare -r GPG_KEY_SHA512="bac9dcdded32ddef41ec0fe79562c8f6bb8b2247a802cf55cd7a05c3200d50400a445d8831d013347c823a32cf75ba72caa604bc4d0263898d34e669a5cb9f0b"
+# 所有的仓库需要确保 rpm 包都可以使用 $GPG_KEY_FILE 进行签名验证
 declare -A repo_urls
 repo_urls=(
-    # FIXME 需要更新 URL
-    ["cloudosbaseos"]="https://dl.rockylinux.org/pub/rocky/${SUPPORTED_MAJOR}/BaseOS/$ARCH/os/"
-    ["cloudosappstream"]="https://dl.rockylinux.org/pub/rocky/${SUPPORTED_MAJOR}/AppStream/$ARCH/os/"
+    ["cloudosbaseos"]="https://mirrors.opencloudos.tech/opencloudos/9.0/BaseOS/$ARCH/os/"
+    ["cloudosappstream"]="https://mirrors.opencloudos.tech/opencloudos/9.0/AppStream/$ARCH/os/"
+    ["cloudosextras"]="https://mirrors.opencloudos.tech/opencloudos/9.0/extras/$ARCH/os/"
 )
 
 # 可能有一些需要额外安装的软件包，在这里列出来
 always_install=()
-
-# 流仓库软件包需要特殊处理
-declare -g -A stream_repos_pkgs
-stream_repos_pkgs=(
-    # FIXME
-    [rocky - repos]=centos-stream-repos
-    [epel - release]=epel-next-release
-)
 
 # | 架构    | grub2-efi      | shim      |
 # | ------- | -------------- | --------- |
@@ -185,18 +167,6 @@ stream_repos_pkgs=(
 declare -A CPU_ARCH_SUFFIX_MAPPING=(
     ["x86_64"]=x64
     ["aarch64"]=aa64
-)
-
-# 重命名时添加在 openCloud OS 流仓库文件的前缀
-STREAM_PREFIX_STR="stream-"
-
-# TODO Always replace these stream packages with their Rocky Linux equivalents.
-stream_always_replace=(
-    fwupdate\*
-    grub2-\*
-    shim-\*
-    kernel
-    kernel-\*
 )
 
 # 这些目录需要预留有这么大的空间，单位是 MiB
@@ -243,9 +213,6 @@ function exit_clean() {
 }
 
 function pre_check() {
-    # TODO: 检查环境特征，必须是 openCloudOS
-    : something
-
     if ! dnf -y check; then
         error_exit "Errors found in dnf/rpm database. Please correct before running ${SCRIPT_NAME}"
     fi
@@ -281,15 +248,14 @@ function pre_check() {
     fi
 }
 
-# 脚本所需的命令都在 openCloud OS 8 的最小安装中，所有必须的二进制都在 /bin 目录中
+# 脚本所需的命令都在 OpenCloud OS 8 的最小安装中，所有必须的二进制都在 /bin 目录中
 # 除非运行环境本身已经损坏，否则迁移脚本在这里不会失败。
 function bin_check() {
-    # 我们仅支持升级 openCloud OS 8 到 openCloud OS 9
-    if [[ $(linux_dist_info PLATFORM_ID) != "$SUPPORTED_PLATFORM" ]]; then
-        error_exit 'This script must be run on an EL9 distribution. Migration from other distributions is not supported.'
+    # 我们仅支持升级 OpenCloud OS 8 到 OpenCloud OS 9
+    if [[ $(linux_dist_info PLATFORM_ID) != "oc8" ]]; then
+        error_exit 'This script must be run on OpenCloud OS 8. Upgrade from other distributions is not supported.'
     fi
 
-    local -a missing
     local -a bins=(
         rpm dnf awk column tee tput mkdir cat arch sort uniq rmdir df
         rm head curl sha512sum mktemp systemd-detect-virt sed grep
@@ -297,31 +263,11 @@ function bin_check() {
     if [[ $update_efi ]]; then
         bins+=(findmnt grub2-mkconfig efibootmgr mokutil lsblk)
     fi
+
+    local -a missing
     for bin in "${bins[@]}"; do
         if ! type "$bin" &>/dev/null; then
             missing+=("$bin")
-        fi
-    done
-
-    local -A pkgs
-    pkgs=(
-        ["dnf"]=4.2
-        ["dnf-plugins-core"]=0
-    )
-
-    # 比较新老版本的版本号，现在使用 sort -V 进行版本检查
-    function pkg_ver() (
-        _ver=$(rpm -q --qf '%{VERSION}\n' "$1") || return 2
-        if [[ $(sort -V <<<"${_ver}"$'\n'"$2" | head -1) != "$2" ]]; then
-            return 1
-        fi
-        return 0
-    )
-
-    for pkg in "${!pkgs[@]}"; do
-        ver=${pkgs[$pkg]}
-        if ! pkg_ver "$pkg" "$ver"; then
-            error_exit "$pkg >= $ver is required for this script. Please run 'dnf install $pkg; dnf update' first."
         fi
     done
 
@@ -333,7 +279,7 @@ function bin_check() {
 # 禁用 epel 仓库以避免 extras 仓库错误映射
 function repoquery() {
     local name val prev result
-    # TODO 检查是否有 epel 仓库
+    # 禁用 epel 仓库
     result=$(safednf -y -q "${dist_repourl_swaps[@]}" \
         --setopt=epel.excludepkgs=epel-release repoquery -i "$1") ||
         error_exit "Failed to fetch info for package $1."
@@ -358,7 +304,7 @@ function _repoinfo() {
         safednf -y -q --repo="$1" "${dist_repourl_swaps[@]}" repoinfo "$1"
     ) || return
     if [[ $result == 'Total packages: 0' ]]; then
-        # We didn't match this repo.
+        # 不匹配这个仓库
         return 1
     fi
     declare -gA repoinfo_results=()
@@ -374,7 +320,7 @@ function _repoinfo() {
         fi
     done <<<"${result}"
 
-    # Set the enabled state
+    # 设置启用状态
     if [[ ! "${enabled_repo_check["$1"]}" ]]; then
         repoinfo_results["Repo-status"]="disabled"
     fi
@@ -391,9 +337,7 @@ function _repoinfo() {
         ' <"${repoinfo_results["Repo-filename"]}"
     )
 
-    # Add an indicator of whether this is a subscription-manager managed
-    # repository.
-    # shellcheck disable=SC2154
+    # 添加一个指示是否为订阅管理的仓库的标识符。
     repoinfo_results["Repo-managed"]=$(
         awk '
             BEGIN {FS="[)(]"}
@@ -402,7 +346,7 @@ function _repoinfo() {
     )
 }
 
-# We now store the repoinfo results in a cache.
+# 现在将仓库信息储存到一个缓存中
 declare -g -A repoinfo_results_cache=()
 function repoinfo() {
     local k
@@ -445,9 +389,8 @@ provides_pkg() (
     printf '%s\n' "$pkg"
 )
 
-# If you pass an empty arg as one of the package specs to rpm it will match
-# every package on the system. This function simply strips out any empty args
-# and passes the rest to rpm to avoid this side-effect.
+# 如果你将一个空参数作为软件包规范之一传递给rpm，它将匹配系统上的每个软件包。
+# 这个函数只是将任何空参数剥离掉，并将剩下的参数传递给rpm，以避免这种副作用。
 saferpm() (
     args=()
     for a in "$@"; do
@@ -458,7 +401,7 @@ saferpm() (
     rpm "${args[@]}"
 )
 
-# And a similar function for dnf
+# 创建一个与 saferpm 函数类似的函数，用于执行 dnf 命令
 safednf() (
     args=()
     for a in "$@"; do
@@ -469,36 +412,11 @@ safednf() (
     dnf "${args[@]}"
 )
 
-#
-# Three ways we check the repourl. If dnf repoinfo fails then we assume the URL
-# is bad. A missing URL is also considered bad. Lastly we check to see if we
-# can fetch the repomd.xml file from the repository, and if not then the repourl
-# is considered bad. In any of these cases we'll end up replacing the repourl
-# with a good one from our mirror of CentOS vault.
-#
-function check_repourl() {
-    repoinfo "$1" || return
-    if [[ ! ${repoinfo_results["Repo - baseurl"]} ]]; then
-        return 1
-    fi
-
-    local -a urls
-    IFS=, read -r -a urls <<<"${repoinfo_results["Repo - baseurl"]}"
-    local u url
-    for url in "${urls[@]}"; do
-        # FIXME: 这里要做个什么事？
-        u="${url}"
-        curl -sfLI "${u%% *}repodata/repomd.xml" >/dev/null && return
-    done
-    return "$(($? ? $? : 1))"
-}
-
 function collect_system_info() {
     # Dump the DNF cache first so we start with a clean slate.
-    infomsg $'\nRemoving dnf cache\n'
+    logger_info 'Removing dnf cache'
     rm -rf /var/cache/{yum,dnf}
-    # Check the efi mount first, so we can bail before wasting time on all these
-    # other checks if it's not there.
+    # 首先检查 efi 挂载点，如果不存在，我们可以在进行其他检查之前立即退出。
     if [[ $update_efi ]]; then
         local efi_mount kname
         declare -g -a efi_disk efi_partition
@@ -511,9 +429,7 @@ function collect_system_info() {
         if [[ ${efi_disk[0]} ]]; then
             efi_partition=("$(<"/sys/block/${efi_disk[0]}/$kname/partition")")
         else
-            # This is likely an md-raid or other type of virtual disk, we need
-            # to dig a little deeper to find the actual physical disks and
-            # partitions.
+            # 这可能是一个 md-raid 或其他类型的虚拟磁盘，我们需要进一步查找实际的物理磁盘和分区。
             kname=$(lsblk -dno kname "$efi_mount")
             cd "/sys/block/$kname/slaves" || error_exit \
                 "Unable to gather EFI data: Can't cd to /sys/block/$kname/slaves."
@@ -536,33 +452,17 @@ function collect_system_info() {
             cd -
         fi
 
-        # We need to make sure that these packages are always installed in an
-        # EFI system.
+        # 我们需要确保这些软件包始终在 EFI 系统中安装。
         always_install+=(
             "shim-${CPU_ARCH_SUFFIX_MAPPING[$ARCH]}"
             "grub2-efi-${CPU_ARCH_SUFFIX_MAPPING[$ARCH]}"
         )
     fi
 
-    # Don't enable these module streams, even if they are enabled in the source
-    # distro.
-    declare -g -a module_excludes
-    module_excludes=(
-    )
-
-    # Some OracleLinux modules have stream names of ol9 instead of rhel9 and ol
-    # instead of rhel. This is a map that does a glob match and replacement.
-    local -A module_glob_map
-    module_glob_map=(
-        ['%:ol9']=:rhel9
-        ['%:ol']=:rhel
-    )
-
-    # We need to map rockylinux repository names to the equivalent repositories
-    # in the source distro. To do that we look for known packages in each
-    # repository and see what repo they came from. We need to use repoquery for
-    # this which requires downloading the package, so we pick relatively small
-    # packages for this.
+    # 我们需要将 OpenCloud 仓库的名称映射到源发行版中相应的仓库。
+    # 为此，我们查找每个仓库中已知的软件包，并查看它们来自哪个仓库。
+    # 我们需要使用repoquery来进行此操作，而repoquery需要下载软件包，
+    # 因此我们选择相对较小的软件包进行此操作。
     declare -g -A repo_map pkg_repo_map
     declare -g -a managed_repos
     pkg_repo_map=(
@@ -571,25 +471,18 @@ function collect_system_info() {
         [highavailability]=pacemaker-doc.noarch
         [crb]=python3-mpich.$ARCH
         [extras]=epel-release.noarch
-        #        [devel]=quota-devel.$ARCH
     )
 
     dist_id=$(linux_dist_info ID)
-    # We need a different dist ID for CentOS Linux vs CentOS Stream
-    if [[ $dist_id == centos ]] && rpm --quiet -q centos-stream-release; then
-        dist_id+=-stream
-    fi
-
     PRETTY_NAME=$(linux_dist_info PRETTY_NAME)
-    infomsg '%s' \
-        "Preparing to migrate $PRETTY_NAME to Rocky Linux 9."$'\n\n'
+    logger_info "Preparing to migrate $PRETTY_NAME to OpenCloudOS 9.0."
 
-    # Check to see if we need to change the repourl on any system repositories
+    # 检查是否需要更改任何系统仓库的 repourl
     local -A dist_repourl_map
     dist_repourl_map=(
     )
 
-    # We need a list of enabled repositories
+    # 我们需要列出启用的仓库
     local -a enabled_repos=()
     declare -g -A enabled_repo_check=()
     declare -g -a dist_repourl_swaps=()
@@ -598,13 +491,11 @@ function collect_system_info() {
         enabled_repo_check[${r%% *}]=1
     done
 
-    # ...and finally set a number of dnf options to replace the baseurl of these
-    # repos
+    # 最后设置一些 dnf 选项来替换这些仓库的 baseurl
     local k
     for k in "${!dist_repourl_map[@]}"; do
         local d=${k%%:*} r=${k#*:}
-        if [[ $d != "$dist_id" || ! ${enabled_repo_check[$r]} ]] ||
-            check_repourl "$r"; then
+        if [[ $d != "$dist_id" || ! ${enabled_repo_check[$r]} ]]; then
             continue
         fi
 
@@ -615,11 +506,10 @@ function collect_system_info() {
             "--setopt=$r.baseurl=${dist_repourl_map[$k]}"
         )
 
-        infomsg 'Baseurl for %s is invalid, setting to %s.\n' \
-            "$r" "${dist_repourl_map[$k]}"
+        logger_info "Baseurl for ${r} is invalid, setting to ${dist_repourl_map[${k}]}."
     done
 
-    infomsg '%s' "Determining repository names for $PRETTY_NAME"
+    logger_info "Determining repository names for ${PRETTY_NAME}"
 
     for r in "${!pkg_repo_map[@]}"; do
         printf '.'
@@ -628,69 +518,44 @@ function collect_system_info() {
         repo_map[$r]=${repoquery_results[Repository]}
     done
 
-    printf '%s\n' '' '' \
-        "Found the following repositories which map from $PRETTY_NAME to Rocky Linux 9:"
-    column -t -s $'\t' -N "$PRETTY_NAME,Rocky Linux 9" < <(
-        for r in "${!repo_map[@]}"; do
-            printf '%s\t%s\n' "${repo_map[$r]}" "$r"
-        done
-    )
+    logger_info "Getting system package names for ${PRETTY_NAME}"
 
-    infomsg $'\n'"Getting system package names for $PRETTY_NAME"
-
-    # We don't know what the names of these packages are, we have to discover
-    # them via various means. The most common means is to look for either a
-    # distro-agnostic provides or a filename. In a couple of cases we need to
-    # jump through hoops to get a filename that is provided specifically by the
-    # source distro.
-    # Get info for each repository to determine which ones are subscription
-    # managed.
-    # system-release here is a bit of a hack, but it ensures that the
-    # rocky-repos package will get installed.
+    # 我们不知道这些软件包的名称，我们必须通过各种方式来发现它们。
+    # 最常见的方式是查找通用的提供者或文件名。
+    # 在某些情况下，我们需要通过一些手段来获取特定源发行版提供的文件名。
+    # 获取每个仓库的信息，以确定哪些是订阅管理的。
     for r in "${!repo_map[@]}"; do
         repoinfo "${repo_map[$r]}" ||
             error_exit "Failed to fetch info for repository ${repo_map[$r]}."
 
         if [[ $r == "baseos" ]]; then
-            local baseos_filename=system-release
-            if [[ ! ${repoinfo_results[Repo - managed]} ]]; then
-                baseos_filename="${repoinfo_results[Repo - filename]}"
+            local baseos_filename="system-release"
+            if [[ ! ${repoinfo_results["Repo-managed"]} ]]; then
+                baseos_filename="${repoinfo_results["Repo-filename"]}"
             fi
-            local baseos_gpgkey="${repoinfo_results[Repo - gpgkey]}"
+            local baseos_gpgkey="${repoinfo_results["Repo-gpgkey"]}"
         fi
-        if [[ ${repoinfo_results[Repo - managed]} ]]; then
+        if [[ ${repoinfo_results["Repo-managed"]} ]]; then
             managed_repos+=("${repo_map[$r]}")
         fi
     done
 
-    # First get info for the baseos repo
+    # 首先获取 baseos 仓库的信息，以确定我们是否需要更改 baseos 仓库的 repourl
     repoinfo "${repo_map[baseos]}" ||
         error_exit "Failed to fetch info for repository ${repo_map[baseos]}."
 
     declare -g -A pkg_map provides_pkg_map
     declare -g -a addl_provide_removes addl_pkg_removes
     provides_pkg_map=(
-        [rocky - backgrounds]=system-backgrounds
-        [rocky - indexhtml]=redhat-indexhtml
-        [rocky - repos]="$baseos_filename"
-        [rocky - logos]=system-logos
-        [rocky - logos - httpd]=system-logos-httpd
-        [rocky - logos - ipa]=system-logos-ipa
-        [rocky - gpg - keys]="$baseos_gpgkey"
-        [rocky - release]=system-release
+        ["opencloudos-backgrounds"]=system-backgrounds
+        ["opencloudos-indexhtml"]=opencloudos-indexhtml
+        ["opencloudos-repos"]="$baseos_filename"
+        ["opencloudos-logos"]=system-logos
+        ["opencloudos-logos-httpd"]=system-logos-httpd
+        ["opencloudos-logos-ipa"]=system-logos-ipa
+        ["opencloudos-gpg-keys"]="$baseos_gpgkey"
+        ["opencloudos-release"]=system-release
     )
-    addl_provide_removes=(
-        redhat-release
-        redhat-release-eula
-    )
-
-    # Check to make sure that we don't already have a full or partial
-    # RockyLinux install.
-    if [[ $(rpm -qa "${!provides_pkg_map[@]}") ]]; then
-        error_exit \
-            $'Found a full or partial RockyLinux install already in place. Aborting\n' \
-            $'because continuing with the migration could cause further damage to system.'
-    fi
 
     for pkg in "${!provides_pkg_map[@]}"; do
         printf '.'
@@ -706,16 +571,12 @@ function collect_system_info() {
     done
 
     # shellcheck disable=SC2140
-    printf '%s\n' '' '' \
-        "Found the following system packages which map from $PRETTY_NAME to Rocky ""\
-Linux 9:"
-    column -t -s $'\t' -N "$PRETTY_NAME,Rocky Linux 9" < <(
-        for p in "${!pkg_map[@]}"; do
-            printf '%s\t%s\n' "${pkg_map[$p]}" "$p"
-        done
-    )
+    logger_info "Found the following system packages which map from ${PRETTY_NAME} to OpenCloud OS 9:"
+    for p in "${!pkg_map[@]}"; do
+        logger_info "${pkg_map[$p]} - $p"
+    done
 
-    infomsg $'\n'"Getting list of installed system packages."$'\n'
+    logger_info $'\n'"Getting list of installed system packages."$'\n'
 
     readarray -t installed_packages < <(
         saferpm -qa --queryformat="%{NAME}\n" "${pkg_map[@]}"
@@ -730,61 +591,20 @@ Linux 9:"
         fi
     done
 
-    # Special Handling for CentOS Stream Repos
-    installed_sys_stream_repos_pkgs=()
-    installed_stream_repos_pkgs=()
-    for p in "${!stream_repos_pkgs[@]}"; do
-        if [[ ${installed_pkg_map[$p]} &&
-            ${installed_pkg_map[$p]} == "${stream_repos_pkgs[$p]}" ]]; then
-            # System package that needs to be swapped / disabled
-            installed_pkg_map[$p]=
-            installed_sys_stream_repos_pkgs+=("${stream_repos_pkgs[$p]}")
-        elif rpm --quiet -q "${stream_repos_pkgs[$p]}"; then
-            # Non-system package, repos just need to be disabled.
-            installed_stream_repos_pkgs+=("${stream_repos_pkgs[$p]}")
-        fi
+    # shellcheck disable=SC2140
+    logger_info "We will replace the following ${PRETTY_NAME} packages with their OpenCloud OS 9"
+
+    for p in "${!installed_pkg_map[@]}"; do
+        logger_info "${installed_pkg_map[$p]} - $p"
     done
 
-    # shellcheck disable=SC2140
-    printf '%s\n' '' \
-        "We will replace the following $PRETTY_NAME packages with their Rocky Linux 9 ""\
-equivalents"
-    column -t -s $'\t' -N "Packages to be Removed,Packages to be Installed" < <(
-        for p in "${!installed_pkg_map[@]}"; do
-            printf '%s\t%s\n' "${installed_pkg_map[$p]}" "$p"
-        done
-    )
-
-    if ((${#installed_sys_stream_repos_pkgs[@]})); then
-        # shellcheck disable=SC2026
-        printf '%s\n' '' \
-            'Also to aid the transition from CentOS Stream the following packages will be ''removed from the rpm database but the included repos will be renamed and ''retained but disabled:' \
-            "${installed_sys_stream_repos_pkgs[@]}"
-    fi
-
-    if ((${#installed_stream_repos_pkgs[@]})); then
-        # shellcheck disable=SC2026
-        printf '%s\n' '' \
-            'Also to aid the transition from CentOS Stream the repos included in the ''following packages will be renamed and retained but disabled:' \
-            "${installed_stream_repos_pkgs[@]}"
-    fi
-
     if ((${#addl_pkg_removes[@]})); then
-        printf '%s\n' '' \
-            "In addition to the above the following system packages will be removed:" \
-            "${addl_pkg_removes[@]}"
+        logger_info "In addition to the above the following system packages will be removed: ${addl_pkg_removes[*]}"
     fi
 
-    # Release packages that are part of SIG's should be listed below when they
-    # are available.
-    # UPDATE: We may or may not do something with SIG's here, it could just be
-    # left as a separate exercise to swap out the sig repos.
-    #sigs_to_swap=()
+    logger_info "Getting a list of enabled modules for the system repositories."
 
-    infomsg '%s' $'\n' \
-        $'Getting a list of enabled modules for the system repositories.\n'
-
-    # Get a list of system enabled modules.
+    # 获取系统已经启用的模块流
     readarray -t enabled_modules < <(
         set -e -o pipefail
         safednf -y -q "${repo_map[@]/#/--repo=}" "${dist_repourl_swaps[@]}" \
@@ -796,22 +616,22 @@ equivalents"
         set +e +o pipefail
     )
 
-    # Map the known module name differences.
+    # 与已知的模块流进行比较，如果有不匹配的，则将其添加到 disable_modules 数组中
     disable_modules=()
-    local i gl repl mod
+    local i mod
     for i in "${!enabled_modules[@]}"; do
         mod=${enabled_modules[$i]}
-        for gl in "${!module_glob_map[@]}"; do
-            repl=${module_glob_map[$gl]}
-            mod=${mod/$gl/$repl}
-        done
         if [[ $mod != "${enabled_modules[$i]}" ]]; then
             disable_modules+=("${enabled_modules[$i]}")
             enabled_modules["$i"]=$mod
         fi
     done
 
-    # Remove entries matching any excluded modules.
+    # 不启用的模块流
+    declare -g -a module_excludes
+    module_excludes=(
+    )
+    # 删除与任何被排除的模块相匹配的条目。
     if ((${#module_excludes[@]})); then
         printf '%s\n' '' "Excluding modules:" "${module_excludes[@]}"
         local -A module_check='()'
@@ -827,67 +647,40 @@ equivalents"
         enabled_modules=("${tmparr[@]}")
     fi
 
-    printf '%s\n' '' "Found the following modules to re-enable at completion:" \
-        "${enabled_modules[@]}" ''
+    logger_info "Found the following modules to re-enable at completion: ${enabled_modules[*]}"
 
     if ((${#managed_repos[@]})); then
-        # shellcheck disable=SC2026
-        printf '%s\n' '' \
-            'In addition, since this system uses subscription-manager the following ''managed repos will be disabled:' \
-            "${managed_repos[@]}"
+        logger_info "In addition, since this system uses subscription-manager the following managed ""\
+        repos will be disabled: ${managed_repos[*]}"
     fi
 }
 
-convert_info_dir=/root/convert
-unset convert_to_rocky reinstall_all_rpms verify_all_rpms update_efi \
+upgrade_info_dir=/root/upgrade_oc9
+unset upgrade_to_oc9 reinstall_all_rpms verify_all_rpms update_efi \
     CONTAINER_MACROS
 
-function usage() {
-    printf '%s\n' \
-        "Usage: ${0##*/} [OPTIONS]" \
-        '' \
-        'Options:' \
-        '-h Display this help' \
-        '-r Convert to rocky' \
-        '-V Verify switch' \
-        '   !! USE WITH CAUTION !!'
-    exit 1
-} >&2
-
 function generate_rpm_info() {
-    mkdir -p "$convert_info_dir"
-    infomsg "Creating a list of RPMs installed: $1"$'\n'
+    mkdir -p "$upgrade_info_dir"
+    logger_info "Creating a list of RPMs installed: $1"$'\n'
     # shellcheck disable=SC2140
     rpm -qa --qf \
         "%{NAME}|%{VERSION}|%{RELEASE}|%{INSTALLTIME}|%{VENDOR}|%{BUILDTIME}|""\
 %{BUILDHOST}|%{SOURCERPM}|%{LICENSE}|%{PACKAGER}\n" |
-        sort >"${convert_info_dir}/$HOSTNAME-rpm-list-$1.log"
-    infomsg "Verifying RPMs installed against RPM database: $1"$'\n\n'
-    rpm -Va | sort -k3 >"\
-${convert_info_dir}/$HOSTNAME-rpm-list-verified-$1.log"
+        sort >"${upgrade_info_dir}/$HOSTNAME-rpm-list-$1.log"
+    logger_info "Verifying RPMs installed against RPM database: $1"
+    rpm -Va | sort -k3 >"${upgrade_info_dir}/$HOSTNAME-rpm-list-verified-$1.log"
 }
 
-# Run a dnf update before the actual migration.
+# 在真正开始迁移前，先执行一次 dnf update，确保当前系统已经是最新的，这样可以尽可能的减少与目标版本的差异
 function pre_update() {
-    infomsg '%s\n' "Running dnf update before we attempt the migration."
-    safednf -y "${dist_repourl_swaps[@]}" update || error_exit \
-        $'Error running pre-update. Stopping now to avoid putting the system in an\n'$'unstable state. Please correct the issues shown here and try again.'
+    logger_info '%s\n' "Running dnf update before we attempt the migration."
+    safednf -y "${dist_repourl_swaps[@]}" update ||
+        error_exit "Error running pre-update. Stopping now to avoid putting the""\
+        system in an unstable state. Please correct the issues shown here and try again."
 }
 
 function package_swaps() {
-    # Save off any subscription-manager keys, just in case.
-    if (
-        shopt -s failglob dotglob
-        : "$sm_ca_dir"/*
-    ) 2>/dev/null; then
-        tmp_sm_ca_dir=$TMP_DIR/sm-certs
-        mkdir "$tmp_sm_ca_dir" ||
-            error_exit "Could not create directory: $tmp_sm_ca_dir"
-        cp -f -dR --preserve=all "$sm_ca_dir"/* "$tmp_sm_ca_dir/" ||
-            error_exit "Could not copy certs to $tmp_sm_ca_dir"
-    fi
-
-    # prepare repo parameters
+    # 准备仓库参数
     local -a dnfparameters
     for repo in "${!repo_urls[@]}"; do
         dnfparameters+=("--repofrompath=${repo},${repo_urls[${repo}]}")
@@ -895,35 +688,6 @@ function package_swaps() {
         dnfparameters+=("--setopt=${repo}.gpgkey=file://${gpg_key_file}")
     done
 
-    # CentOS Stream specific processing
-    if ((${#installed_stream_repos_pkgs[@]} || ${#installed_sys_stream_repos_pkgs[@]})); then
-        # Get a list of the repo files.
-        local -a repos_files
-        readarray -t repos_files < <(
-            saferpm -ql "${installed_sys_stream_repos_pkgs[@]}" \
-                "${installed_stream_repos_pkgs[@]}" |
-                grep '^/etc/yum\.repos\.d/.\+\.repo$'
-        )
-
-        if ((${#installed_sys_stream_repos_pkgs[@]})); then
-            # Remove the package from the rpm db.
-            saferpm -e --justdb --nodeps -a \
-                "${installed_sys_stream_repos_pkgs[@]}" ||
-                error_exit \
-                    "Could not remove packages from the rpm db: ${installed_sys_stream_repos_pkgs[*]}"
-        fi
-
-        # Rename the stream repos with a prefix and fix the baseurl.
-        # shellcheck disable=SC2016
-        sed -i \
-            -e 's/^\[/['"$STREAM_PREFIX_STR"'/' \
-            -e 's|^mirrorlist=|#mirrorlist=|' \
-            -e 's|^#baseurl=http://mirror.centos.org/$contentdir/$stream/|baseurl=http://mirror.centos.org/centos/9-stream/|' \
-            -e 's|^baseurl=http://vault.centos.org/$contentdir/$stream/|baseurl=https://vault.centos.org/centos/9-stream/|' \
-            "${repos_files[@]}"
-    fi
-
-    # Use dnf shell to swap the system packages out.
     safednf -y shell --disablerepo=\* --noautoremove \
         "${dist_repourl_swaps[@]}" \
         --setopt=protected_packages= --setopt=keepcache=True \
@@ -935,30 +699,20 @@ function package_swaps() {
         exit
 EOF
 
-    # rocky-repos and rocky-gpg-keys are now installed, so we don't need the
-    # key file anymore
+    # 新版本的 opencloudos-repos 已经安装，包含了我们预置的 GPG-KEY，现在可以删除临时文件
     rm -rf "$gpg_tmp_dir"
 
-    # We need to check to make sure that all of the original system packages
-    # have been removed and all of the new ones have been added. If a package
-    # was supposed to be removed and one with the same name added back then
-    # we're kind of screwed for this check, as we can't be certain, but all the
-    # packages we're adding start with "rocky-*" so this really shouldn't happen
-    # and we can safely not check for it. The worst that will happen is a rocky
-    # linux package will be removed and then installed again.
-    local -a check_removed check_installed
+        local -a check_removed check_installed
     readarray -t check_removed < <(
         saferpm -qa --qf '%{NAME}\n' "${installed_pkg_map[@]}" \
             "${addl_pkg_removes[@]}" | sort -u
     )
 
     if ((${#check_removed[@]})); then
-        infomsg '%s' $'\n' \
+        logger_info '%s' $'\n' \
             "Packages found on system that should still be removed. Forcibly" \
             " removing them with rpm:"$'\n'
-        # Removed packages still found on the system. Forcibly remove them.
         for pkg in "${check_removed[@]}"; do
-            # Extra safety measure, skip if empty string
             if [[ -z $pkg ]]; then
                 continue
             fi
@@ -968,7 +722,6 @@ EOF
         done
     fi
 
-    # Check to make sure we installed everything we were supposed to.
     readarray -t check_installed < <(
         {
             printf '%s\n' "${!installed_pkg_map[@]}" | sort -u
@@ -976,11 +729,10 @@ EOF
         } | sort | uniq -u
     )
     if ((${#check_installed[@]})); then
-        infomsg '%s' $'\n' \
+        logger_info '%s' $'\n' \
             "Some required packages were not installed by dnf. Attempting to" \
             " force with rpm:"$'\n'
 
-        # Get a list of rpm packages to package names
         local -A rpm_map
         local -a file_list
         for rpm in /var/cache/dnf/{cloudosbaseos,cloudosappstream}-*/packages/*.rpm; do
@@ -994,12 +746,9 @@ EOF
             printf '%s\n' "$pkg"
             if ! rpm -i --force --nodeps --nodigest "${rpm_map[$pkg]}" \
                 2>/dev/null; then
-                # Try to install the package in just the db, then clean it up.
                 rpm -i --force --justdb --nodeps --nodigest "${rpm_map[$pkg]}" \
                     2>/dev/null
 
-                # Get list of files that are still causing problems and donk
-                # them.
                 readarray -t file_list < <(
                     rpm -V "$pkg" 2>/dev/null | awk '$1!="missing" {print $2}'
                 )
@@ -1009,17 +758,13 @@ EOF
                         rm -rf "$file"
                 done
 
-                # Now try re-installing the package to replace the missing
-                # files. Regardless of the outcome here we just accept it and
-                # move on and hope for the best.
                 rpm -i --reinstall --force --nodeps --nodigest \
                     "${rpm_map[$pkg]}" 2>/dev/null
             fi
         done
     fi
 
-    # Distrosync
-    infomsg $'Ensuring repos are enabled before the package swap\n'
+    logger_info $'Ensuring repos are enabled before the package swap\n'
     safednf -y --enableplugin=config_manager config-manager \
         --set-enabled "${!repo_map[@]}" || {
         printf '%s\n' 'Repo name missing?'
@@ -1027,143 +772,52 @@ EOF
     }
 
     if ((${#managed_repos[@]})); then
-        # Filter the managed repos for ones still in the system.
         readarray -t managed_repos < <(
             safednf -y -q repolist "${managed_repos[@]}" |
                 awk '$1!="repo" {print $1}'
         )
 
         if ((${#managed_repos[@]})); then
-            infomsg $'\nDisabling subscription managed repos\n'
+            logger_info $'\nDisabling subscription managed repos\n'
             safednf -y --enableplugin=config_manager config-manager \
                 --disable "${managed_repos[@]}"
         fi
     fi
 
     if ((${#disable_modules[@]})); then
-        infomsg $'Disabling modules\n\n'
+        logger_info $'Disabling modules\n\n'
         safednf -y module disable "${disable_modules[@]}" ||
             error_exit "Can't disable modules ${disable_modules[*]}"
     fi
 
     if ((${#enabled_modules[@]})); then
-        infomsg $'Enabling modules\n\n'
+        logger_info $'Enabling modules\n\n'
         safednf -y module enable "${enabled_modules[@]}" ||
             error_exit "Can't enable modules ${enabled_modules[*]}"
     fi
 
     # Make sure that excluded modules are disabled.
     if ((${#module_excludes[@]})); then
-        infomsg $'Disabling excluded modules\n\n'
+        logger_info $'Disabling excluded modules\n\n'
         safednf -y module disable "${module_excludes[@]}" ||
             error_exit "Can't disable modules ${module_excludes[*]}"
     fi
 
-    infomsg $'\nSyncing packages\n\n'
+    logger_info $'\nSyncing packages\n\n'
     dnf -y --allowerasing distro-sync ||
         error_exit "Error during distro-sync."
-
-    # Disable Stream repos.
-    if ((${#installed_sys_stream_repos_pkgs[@]} || ${#installed_stream_repos_pkgs[@]})); then
-        dnf -y --enableplugin=config_manager config-manager --set-disabled \
-            "$STREAM_PREFIX_STR*" ||
-            logger_error \
-                $'Failed to disable CentOS Stream repos, please check and disable manually.'
-
-        if ((${#stream_always_replace[@]})) &&
-            [[ $(saferpm -qa "${stream_always_replace[@]}") ]]; then
-            safednf -y distro-sync "${stream_always_replace[@]}" ||
-                error_exit "Error during distro-sync."
-        fi
-
-        infomsg $'\nCentOS Stream Migration Notes:\n\n'
-        cat <<EOF
-Because CentOS Stream leads RockyLinux by the next point release many packages
-in Stream will have higher version numbers than those in RockyLinux, some will
-even be rebased to a new upstream version. Downgrading these packages to the
-versions in RockyLinux carries the risk that the older version may not
-recognize config files, data or other files generated by the newer version in
-Stream.
-
-To avoid issues with this the newer package versions from CentOS Stream have
-been retained. Also the CentOS Stream repositories have been retained but
-renamed with a prefix of "stream-" to avoid clashing with RockyLinux
-repositories, but these same repos have also been disabled so that future
-package installs will come from the stock RockyLinux repositories.
-
-If you do nothing except update to the next point release of RockyLinux when it
-becomes available then the packages retained from Stream should be replaced at
-that time. If you need to update a package from Stream (eg: to fix a bug or
-security issue) then you will need to enable the appropriate repository to do
-so.
-EOF
-    fi
-
-    if rpm --quiet -q subscription-manager; then
-        infomsg $'Subscription Manager found on system.\n\n'
-        cat <<EOF
-If you're converting from a subscription-managed distribution such as RHEL then
-you may no longer need subscription-manager or dnf-plugin-subscription-manager.
-While it won't hurt anything to have it on your system you may be able to safely
-remove it with:
-
-"dnf remove subscription-manager dnf-plugin-subscription-manager".
-
-Take care that it doesn't remove something that you want to keep.
-
-The subscription-manager dnf plugin may be enabled for the benefit of
-Subscription Management. If no longer desired, you can use
-"subscription-manager config --rhsm.auto_enable_yum_plugins=0" to block this
-behavior.
-EOF
-    fi
 
     if ((${#always_install[@]})); then
         safednf -y install "${always_install[@]}" || error_exit \
             "Error installing required packages: ${always_install[*]}"
     fi
-
-    if [[ $tmp_sm_ca_dir ]]; then
-        # Check to see if there's Subscription Manager certs which have been
-        # removed
-        local -a removed_certs
-        readarray -t removed_certs < <((
-            shopt -s nullglob dotglob
-            local -a certs
-            cd "$sm_ca_dir" && certs=(*)
-            cd "$tmp_sm_ca_dir" && certs+=(*)
-            IFS=$'\n'
-            printf '%s' "${certs[*]}"
-        ) | sort | uniq -u)
-
-        if ((${#removed_certs[@]})); then
-            cp -n -dR --preserve=all "$tmp_sm_ca_dir"/* "$sm_ca_dir/" ||
-                error_exit "Could not copy certs back to $sm_ca_dir"
-
-            infomsg '%s' \
-                $'Some Subscription Manager certificates ' \
-                "were restored to $sm_ca_dir after"$'\n' \
-                $'migration so that the subscription-manager ' \
-                $'command will continue to work:\n\n'
-            printf '%s\n' "${removed_certs[@]}" ''
-            cat <<EOF
-If you no longer need to use the subscription-manager command then you may
-safely remove these files.
-EOF
-        fi
-    fi
 }
 
-# Check if this system is running on EFI
-# If yes, we'll need to run fix_efi() at the end of the conversion
 function efi_check() {
-    # Check if we have /sys mounted and it is looking sane
     if ! [[ -d /sys/class/block ]]; then
         error_exit "/sys is not accessible."
     fi
 
-    # Now that we know /sys is reliable, use it to check if we are running on
-    # EFI or not
     if systemd-detect-virt --quiet --container; then
         declare -g CONTAINER_MACROS
         CONTAINER_MACROS=$(mktemp /etc/rpm/macros.zXXXXXX)
@@ -1174,28 +828,22 @@ function efi_check() {
     fi
 }
 
-# Called to update the EFI boot.
 fix_efi() (
-    grub2-mkconfig -o /boot/efi/EFI/rocky/grub.cfg ||
+    grub2-mkconfig -o /boot/efi/EFI/opencloudos/grub.cfg ||
         error_exit "Error updating the grub config."
     for i in "${!efi_disk[@]}"; do
         efibootmgr -c -d "/dev/${efi_disk[$i]}" -p "${efi_partition[$i]}" \
-            -L "Rocky Linux" -l "/EFI/rocky/shim${CPU_ARCH_SUFFIX_MAPPING[$ARCH]}.efi" ||
+            -L "OpenCloud OS" -l "/EFI/opencloudos/shim${CPU_ARCH_SUFFIX_MAPPING[$ARCH]}.efi" ||
             error_exit "Error updating uEFI firmware."
     done
 )
 
-# Download and verify the Rocky Linux package signing key
 function establish_gpg_trust() {
-    # create temp dir and verify it is really created and empty, so we are sure
-    # deleting it afterwards won't cause any harm
     declare -g gpg_tmp_dir
     gpg_tmp_dir=$TMP_DIR/gpg
     if ! mkdir "$gpg_tmp_dir" || [[ ! -d "$gpg_tmp_dir" ]]; then
         error_exit "Error creating temp dir"
     fi
-    # failglob makes pathname expansion fail if empty, dotglob adds files
-    # starting with . to pathname expansion
     if (
         shopt -s failglob dotglob
         : "$gpg_tmp_dir"/*
@@ -1203,12 +851,11 @@ function establish_gpg_trust() {
         error_exit "Temp dir not empty"
     fi
 
-    # extract the filename from the url, use the temp dir just created
-    declare -g gpg_key_file="$gpg_tmp_dir/${GPG_KEY_URL##*/}"
+    declare -g gpg_key_file="$gpg_tmp_dir/${GPG_KEY_FILE##*/}"
 
-    if ! curl -L -o "$gpg_key_file" --silent --show-error "$GPG_KEY_URL"; then
+    if ! cp -fv "$GPG_KEY_FILE" "$gpg_key_file"; then
         rm -rf "$gpg_tmp_dir"
-        error_exit "Error downloading the Rocky Linux signing key."
+        error_exit "Error getting the OpenCloud OS signing key."
     fi
 
     if ! sha512sum --quiet -c <<<"$GPG_KEY_SHA512 $gpg_key_file"; then
@@ -1217,27 +864,38 @@ function establish_gpg_trust() {
     fi
 }
 
-## End actual work
+function usage() {
+    printf '%s\n' \
+        "Usage: ${0##*/} [OPTIONS]" \
+        '' \
+        'Options:' \
+        '-h Display this help' \
+        '-u Upgrade to OpenCloud OS 9' \
+        '-V Verify switch' \
+        '   !! USE WITH CAUTION !!'
+    exit 1
+} >&2
 
 noopts=0
-while getopts "hrVR" option; do
+while getopts "huVR" option; do
     ((noopts++))
     case "$option" in
     h)
         usage
         ;;
-    r)
-        convert_to_rocky=true
+    u)
+        upgrade_to_oc9=true
         ;;
     V)
         verify_all_rpms=true
         ;;
     *)
-        logger_error $'Invalid switch'
+        logger_error $'Invalid argument'
         usage
         ;;
     esac
 done
+
 if ((!noopts)); then
     usage
 fi
@@ -1252,25 +910,26 @@ if [[ $verify_all_rpms ]]; then
     generate_rpm_info begin
 fi
 
-if [[ $convert_to_rocky ]]; then
+if [[ $upgrade_to_oc9 ]]; then
     collect_system_info
     establish_gpg_trust
     pre_update
     package_swaps
 fi
 
-if [[ $verify_all_rpms && $convert_to_rocky ]]; then
+if [[ $verify_all_rpms && $upgrade_to_oc9 ]]; then
     generate_rpm_info finish
-    infomsg $'You may review the following files:\n'
-    printf '%s\n' "$convert_info_dir/$HOSTNAME-rpm-list-"*.log
+    logger_info $'You may review the following files:\n'
+    printf '%s\n' "$upgrade_info_dir/$HOSTNAME-rpm-list-"*.log
 fi
 
-if [[ $update_efi && $convert_to_rocky ]]; then
+if [[ $update_efi && $upgrade_to_oc9 ]]; then
     fix_efi
 fi
 
 printf '\n\n\n'
-if [[ $convert_to_rocky ]]; then
-    infomsg $'\nDone, please reboot your system.\n'
+
+if [[ $upgrade_to_oc9 ]]; then
+    logger_info $'\nDone, please reboot your system.\n'
 fi
 finish_print
