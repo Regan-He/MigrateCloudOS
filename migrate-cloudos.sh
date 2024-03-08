@@ -360,21 +360,21 @@ function _repoinfo() {
 declare -g -A repoinfo_results_cache=()
 function repoinfo() {
     local k
-    if [[ ! ${repoinfo_results_cache[${1}]} ]]; then
+    if [[ ! ${repoinfo_results_cache["${1}"]} ]]; then
         _repoinfo "${@}" || return
-        repoinfo_results_cache[${1}]=1
+        repoinfo_results_cache["${1}"]=1
         for k in "${!repoinfo_results[@]}"; do
-            repoinfo_results_cache["${1}:${k}"]=${repoinfo_results[${k}]}
+            repoinfo_results_cache["${1}:${k}"]="${repoinfo_results["${k}"]}"
         done
     else
         repoinfo_results=()
         for k in "${!repoinfo_results_cache[@]}"; do
-            local repo=${k%%:*} key=${k#*:}
+            local repo="${k%%:*}" key="${k#*:}"
             if [[ ${repo} != "${1}" ]]; then
                 continue
             fi
 
-            repoinfo_results[${key}]=${repoinfo_results_cache[${k}]}
+            repoinfo_results["${key}"]="${repoinfo_results_cache["${k}"]}"
         done
     fi
 }
@@ -441,22 +441,20 @@ function collect_system_info() {
         else
             # 这可能是一个 md-raid 或其他类型的虚拟磁盘，我们需要进一步查找实际的物理磁盘和分区。
             kname=$(lsblk -dno kname "${efi_mount}")
-            cd "/sys/block/${kname}/slaves" || error_exit \
-                "Unable to gather EFI data: Can't cd to /sys/block/${kname}/slaves."
+            cd "/sys/block/${kname}/slaves" ||
+                error_exit "Unable to gather EFI data: Can't cd to /sys/block/${kname}/slaves."
             if ! (
                 shopt -s failglob
                 : ./*
             ) 2>/dev/null; then
-                error_exit \
-                    "Unable to gather EFI data: No slaves found in /sys/block/${kname}/slaves."
+                error_exit "Unable to gather EFI data: No slaves found in /sys/block/${kname}/slaves."
             fi
             efi_disk=()
             for d in *; do
                 efi_disk+=("$(lsblk -dno pkname "/dev/${d}")")
                 efi_partition+=("$(<"${d}/partition")")
                 if [[ ! ${efi_disk[-1]} || ! ${efi_partition[-1]} ]]; then
-                    error_exit \
-                        "Unable to gather EFI data: Can't find disk name or partition number for ${d}."
+                    error_exit "Unable to gather EFI data: Can't find disk name or partition number for ${d}."
                 fi
             done
             cd -
