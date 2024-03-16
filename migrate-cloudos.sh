@@ -530,18 +530,18 @@ function collect_system_info() {
     # 在某些情况下，我们需要通过一些手段来获取特定源发行版提供的文件名。
     # 获取每个仓库的信息，以确定哪些是订阅管理的。
     for r in "${!repo_map[@]}"; do
-        repoinfo "${repo_map[${r}]}" ||
+        repoinfo "${repo_map["${r}"]}" ||
             error_exit "Failed to fetch info for repository ${repo_map[${r}]}."
 
         if [[ "${r}" == "baseos" ]]; then
             local baseos_filename="system-release"
-            if [[ ! ${repoinfo_results["Repo-managed"]} ]]; then
+            if [[ ! "${repoinfo_results["Repo-managed"]}" ]]; then
                 baseos_filename="${repoinfo_results["Repo-filename"]}"
             fi
             local baseos_gpgkey="${repoinfo_results["Repo-gpgkey"]}"
         fi
-        if [[ ${repoinfo_results["Repo-managed"]} ]]; then
-            managed_repos+=("${repo_map[${r}]}")
+        if [[ "${repoinfo_results["Repo-managed"]}" ]]; then
+            managed_repos+=("${repo_map["${r}"]}")
         fi
     done
 
@@ -589,11 +589,11 @@ function collect_system_info() {
     )
     declare -g -A installed_pkg_check installed_pkg_map
     for p in "${installed_packages[@]}"; do
-        installed_pkg_check[${p}]=1
+        installed_pkg_check["${p}"]=1
     done
     for p in "${!pkg_map[@]}"; do
-        if [[ ${pkg_map[${p}]} && ${installed_pkg_check[${pkg_map[${p}]}]} ]]; then
-            installed_pkg_map[${p}]=${pkg_map[${p}]}
+        if [[ "${pkg_map["${p}"]}" && "${installed_pkg_check[${pkg_map[${p}]}]}" ]]; then
+            installed_pkg_map["${p}"]="${pkg_map["${p}"]}"
         fi
     done
 
@@ -626,17 +626,16 @@ function collect_system_info() {
     disable_modules=()
     local i mod
     for i in "${!enabled_modules[@]}"; do
-        mod=${enabled_modules[${i}]}
-        if [[ ${mod} != "${enabled_modules[${i}]}" ]]; then
+        mod="${enabled_modules[${i}]}"
+        if [[ "${mod}" != "${enabled_modules[${i}]}" ]]; then
             disable_modules+=("${enabled_modules[${i}]}")
-            enabled_modules["${i}"]=${mod}
+            enabled_modules["${i}"]="${mod}"
         fi
     done
 
     # 不启用的模块流
     declare -g -a module_excludes
-    module_excludes=(
-    )
+    module_excludes=()
     # 删除与任何被排除的模块相匹配的条目。
     if ((${#module_excludes[@]})); then
         printf '%s\n' '' "Excluding modules:" "${module_excludes[@]}"
@@ -646,7 +645,7 @@ function collect_system_info() {
             module_check[${m}]=1
         done
         for m in "${enabled_modules[@]}"; do
-            if [[ ! ${module_check[${m}]} ]]; then
+            if [[ ! "${module_check["${m}"]}" ]]; then
                 tmparr+=("${m}")
             fi
         done
@@ -719,7 +718,7 @@ EOF
     if ((${#check_removed[@]})); then
         logger_info "Packages found on system that should still be removed. Forcibly removing them with rpm:"
         for pkg in "${check_removed[@]}"; do
-            if [[ -z ${pkg} ]]; then
+            if [[ -z "${pkg}" ]]; then
                 continue
             fi
             printf '%s\n' "${pkg}"
@@ -739,79 +738,65 @@ EOF
         local -A rpm_map
         local -a file_list
         for rpm in /var/cache/dnf/{cloudosbaseos,cloudosappstream}-*/packages/*.rpm; do
-            rpm_map[$(
-                rpm -q --qf '%{NAME}\n' --nodigest "${rpm}" 2>/dev/null
-            )]=${rpm}
+            rpm_map["$(rpm -q --qf '%{NAME}\n' --nodigest "${rpm}" 2>/dev/null)"]="${rpm}"
         done
 
         # Attempt to install.
         for pkg in "${check_installed[@]}"; do
             printf '%s\n' "${pkg}"
-            if ! rpm -i --force --nodeps --nodigest "${rpm_map[${pkg}]}" \
-                2>/dev/null; then
-                rpm -i --force --justdb --nodeps --nodigest "${rpm_map[${pkg}]}" \
-                    2>/dev/null
+            if ! rpm -i --force --nodeps --nodigest "${rpm_map[${pkg}]}" 2>/dev/null; then
+                rpm -i --force --justdb --nodeps --nodigest "${rpm_map[${pkg}]}" 2>/dev/null
 
                 readarray -t file_list < <(
                     rpm -V "${pkg}" 2>/dev/null | awk '$1!="missing" {print $2}'
                 )
                 for file in "${file_list[@]}"; do
-                    rmdir "${file}" ||
-                        rm -f "${file}" ||
-                        rm -rf "${file}"
+                    rmdir "${file}" || rm -f "${file}" || rm -rf "${file}"
                 done
 
-                rpm -i --reinstall --force --nodeps --nodigest \
-                    "${rpm_map[${pkg}]}" 2>/dev/null
+                rpm -i --reinstall --force --nodeps --nodigest "${rpm_map[${pkg}]}" 2>/dev/null
             fi
         done
     fi
 
     logger_info "Ensuring repos are enabled before the package swap."
-    safednf -y --enableplugin=config_manager config-manager \
-        --set-enabled "${!repo_map[@]}" || {
+    safednf -y --enableplugin=config_manager config-manager --set-enabled "${!repo_map[@]}" || {
         printf '%s\n' 'Repo name missing?'
         exit 25
     }
 
     if ((${#managed_repos[@]})); then
         readarray -t managed_repos < <(
-            safednf -y -q repolist "${managed_repos[@]}" |
-                awk '$1!="repo" {print $1}'
+            safednf -y -q repolist "${managed_repos[@]}" | awk '$1!="repo" {print $1}'
         )
 
         if ((${#managed_repos[@]})); then
             logger_info "Disabling subscription managed repos"
-            safednf -y --enableplugin=config_manager config-manager \
-                --disable "${managed_repos[@]}"
+            safednf -y --enableplugin=config_manager config-manager --disable "${managed_repos[@]}"
         fi
     fi
 
     if ((${#disable_modules[@]})); then
         logger_info "Disabling modules..."
-        safednf -y module disable "${disable_modules[@]}" ||
-            error_exit "Can't disable modules ${disable_modules[*]}"
+        safednf -y module disable "${disable_modules[@]}" || error_exit "Can't disable modules ${disable_modules[*]}"
     fi
 
     if ((${#enabled_modules[@]})); then
         logger_info "Enabling modules..."
-        safednf -y module enable "${enabled_modules[@]}" ||
-            error_exit "Can't enable modules ${enabled_modules[*]}"
+        safednf -y module enable "${enabled_modules[@]}" || error_exit "Can't enable modules ${enabled_modules[*]}"
     fi
 
     # Make sure that excluded modules are disabled.
     if ((${#module_excludes[@]})); then
         logger_info "Disabling excluded modules..."
-        safednf -y module disable "${module_excludes[@]}" ||
-            error_exit "Can't disable modules ${module_excludes[*]}"
+        safednf -y module disable "${module_excludes[@]}" || error_exit "Can't disable modules ${module_excludes[*]}"
     fi
 
     logger_info "Syncing packages..."
     dnf -y --allowerasing distro-sync || error_exit "Error during distro-sync."
 
     if ((${#always_install[@]})); then
-        safednf -y install "${always_install[@]}" || error_exit \
-            "Error installing required packages: ${always_install[*]}"
+        safednf -y install "${always_install[@]}" || error_exit "Error installing required packages: ${always_install[*]}"
     fi
 }
 
@@ -825,8 +810,7 @@ function efi_check() {
         CONTAINER_MACROS=$(mktemp /etc/rpm/macros.zXXXXXX)
         printf '%s\n' '%_netsharedpath /sys:/proc' >"${CONTAINER_MACROS}"
     elif [[ -d /sys/firmware/efi/ ]]; then
-        declare -g update_efi
-        update_efi=true
+        declare -g update_efi=true
     fi
 }
 
