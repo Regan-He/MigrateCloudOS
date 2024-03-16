@@ -14,13 +14,15 @@ if ((EUID != 0)); then
 fi
 
 # 需要在 C.UTF-8 模式下运行，以保证可以正确记录过程中所有输出的信息
-if ! localectl list-locales | grep -qE '^C.UTF-8'; then
-    echo >&2 "C.UTF-8 not found."
+valid_locale="$(localectl list-locales | grep -iEo '^C.UTF[-]?8')"
+# shellcheck disable=SC2181
+if [[ $? -ne 0 ]] || [[ -z "${valid_locale}" ]]; then
+    echo >&2 "C.UTF-8 locale is not available."
     exit 1
 fi
 
-export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
+export LANG="${valid_locale}"
+export LC_ALL="${valid_locale}"
 unset LANGUAGE
 
 # 需要使用关联数组功能，这要求 bash 版本不低于 4.2，在 CloudOS 8 中是满足的，
@@ -43,8 +45,8 @@ shopt -s nullglob
 unset CDPATH
 
 # 日志文件定义，最多保存 10 份以前的日志
-declare -r LOG_FILE="/var/log/migrate8to9.log"
-declare -ri MAXLOG_NUM=10
+declare -r LOG_FILE="/root/migrate8to9.log"
+declare -ri MAXLOG_NUM=5
 # 这是一条需要复用的日志输出内容，使用一个变量临时保存
 err_message="Unable to rotate logfiles, continuing without rotation."
 if ! \mv -f "${LOG_FILE}" "${LOG_FILE}.0"; then
@@ -78,12 +80,7 @@ function print2stdout() {
 }
 
 function print2logfile() {
-    if [ -z "${LOG_FILE}" ]; then
-        return
-    fi
-    local -r message="$*"
-    local -r log_file="/tmp/logger.log"
-    printf '%s\n' "${message}" >>"${log_file}"
+    printf '%s\n' "$*" >>"${LOG_FILE}"
 }
 
 function process_logger() {
@@ -149,7 +146,7 @@ ARCH="$(arch)"
 # OpenCloudOS-9 更新了 GPG KEY，需要使用新的 KEY 进行验证
 # 这个 key 文件是从 OpenCloudOS-9 的 opencloudos-repos RPM 包中提取出来的
 declare -r GPG_KEY_FILE="${SCRIPT_PATH}/OpenCloud-9-gpgkey/RPM-GPG-KEY-OpenCloudOS-9"
-declare -r GPG_KEY_SHA512="bac9dcdded32ddef41ec0fe79562c8f6bb8b2247a802cf55cd7a05c3200d50400a445d8831d013347c823a32cf75ba72caa604bc4d0263898d34e669a5cb9f0b"
+declare -r GPG_KEY_SHA512="238c0f8cb3c22bfdedf6f4a7f9e3e86393101304465a442f8e359da9668aad075da06f50b8263dcec6edc3da5711234f4fc183581367b3b48fb24f505429b579"
 # 所有的仓库需要确保 rpm 包都可以使用 $GPG_KEY_FILE 进行签名验证，
 # OpenCloudOS-9 的仓库与 OpenCloudOS-8 的仓库结构不同，不能复用 OpenCloudOS-8 的 repo 配置，
 # 这里直接列出所有可用仓库的 URL
@@ -262,7 +259,7 @@ function pre_check() {
 # 除非运行环境本身已经损坏，否则迁移脚本在这里不应该失败。
 function bin_check() {
     # 仅支持升级 OpenCloud OS 8 到 OpenCloud OS 9
-    if [[ $(linux_dist_info PLATFORM_ID) != "oc8" ]]; then
+    if [[ $(linux_dist_info PLATFORM_ID) != "platform:oc8" ]]; then
         error_exit 'This script must be run on OpenCloud OS 8. Upgrade from other distributions is not supported.'
     fi
 
@@ -387,7 +384,7 @@ provides_pkg() (
     set -o pipefail
     provides=$(
         safednf -y -q "${dist_repourl_swaps[@]}" provides "${1}" |
-            awk '{print ${1}; nextfile}'
+            awk '{print $1; nextfile}'
     ) ||
         return 1
     set +o pipefail
@@ -415,7 +412,7 @@ function saferpm() (
 function safednf() (
     args=()
     for a in "${@}"; do
-        if [[ ${a} ]]; then
+        if [[ "${a}" ]]; then
             args+=("${a}")
         fi
     done
@@ -521,9 +518,9 @@ function collect_system_info() {
 
     for r in "${!pkg_repo_map[@]}"; do
         printf '.'
-        p=${pkg_repo_map[${r}]}
+        p="${pkg_repo_map["${r}"]}"
         repoquery "${p}" || continue
-        repo_map[${r}]=${repoquery_results[Repository]}
+        repo_map["${r}"]="${repoquery_results["Repository"]}"
     done
 
     logger_info "Getting system package names for ${PRETTY_NAME}"
@@ -536,7 +533,7 @@ function collect_system_info() {
         repoinfo "${repo_map[${r}]}" ||
             error_exit "Failed to fetch info for repository ${repo_map[${r}]}."
 
-        if [[ ${r} == "baseos" ]]; then
+        if [[ "${r}" == "baseos" ]]; then
             local baseos_filename="system-release"
             if [[ ! ${repoinfo_results["Repo-managed"]} ]]; then
                 baseos_filename="${repoinfo_results["Repo-filename"]}"
@@ -552,6 +549,7 @@ function collect_system_info() {
     repoinfo "${repo_map[baseos]}" ||
         error_exit "Failed to fetch info for repository ${repo_map[baseos]}."
 
+    # TODO:这里的映射影响后续升级产品标志包，造成了升级异常
     declare -g -A pkg_map provides_pkg_map
     declare -g -a addl_provide_removes addl_pkg_removes
     provides_pkg_map=(
@@ -567,8 +565,8 @@ function collect_system_info() {
 
     for pkg in "${!provides_pkg_map[@]}"; do
         printf '.'
-        prov=${provides_pkg_map[${pkg}]}
-        pkg_map[${pkg}]=$(provides_pkg "${prov}") ||
+        prov="${provides_pkg_map["${pkg}"]}"
+        pkg_map["${pkg}"]="$(provides_pkg "${prov}")" ||
             error_exit "Can't get package that provides ${prov}."
     done
     for prov in "${addl_provide_removes[@]}"; do
@@ -584,7 +582,7 @@ function collect_system_info() {
         logger_info "${pkg_map[${p}]} - ${p}"
     done
 
-    logger_info $'\n'"Getting list of installed system packages."$'\n'
+    logger_info "Getting list of installed system packages."
 
     readarray -t installed_packages < <(
         saferpm -qa --queryformat="%{NAME}\n" "${pkg_map[@]}"
@@ -601,7 +599,7 @@ function collect_system_info() {
 
     # shellcheck disable=SC2140
     logger_info "We will replace the following ${PRETTY_NAME} packages with their OpenCloud OS 9"
-
+    # TODO:检查映射
     for p in "${!installed_pkg_map[@]}"; do
         logger_info "${installed_pkg_map[${p}]} - ${p}"
     done
@@ -664,9 +662,9 @@ function collect_system_info() {
 }
 
 upgrade_info_dir=/root/upgrade_oc9
-unset upgrade_to_oc9 reinstall_all_rpms verify_all_rpms update_efi \
-    CONTAINER_MACROS
+unset upgrade_to_oc9 reinstall_all_rpms verify_all_rpms update_efi CONTAINER_MACROS
 
+# 生成一个已安装RPM的列表，并将其与RPM数据库进行核对。
 function generate_rpm_info() {
     mkdir -p "${upgrade_info_dir}"
     logger_info "Creating a list of RPMs installed: ${1}"
@@ -687,6 +685,8 @@ function pre_update() {
         system in an unstable state. Please correct the issues shown here and try again."
 }
 
+# 该功能通过准备仓库参数并使用safednf命令来移除和安装包来执行包交换。它还处理所需包的移除和安装，
+# 以及启用和禁用仓库、模块，并排除某些模块。最后，它会同步包，并在指定的情况下安装所需的包。
 function package_swaps() {
     # 准备仓库参数
     local -a dnfparameters
@@ -696,7 +696,7 @@ function package_swaps() {
         dnfparameters+=("--setopt=${repo}.gpgkey=file://${gpg_key_file}")
     done
 
-    safednf -y shell --disablerepo=\* --noautoremove \
+    safednf -y shell --disablerepo='*' --noautoremove \
         "${dist_repourl_swaps[@]}" \
         --setopt=protected_packages= --setopt=keepcache=True \
         "${dnfparameters[@]}" \
@@ -717,9 +717,7 @@ EOF
     )
 
     if ((${#check_removed[@]})); then
-        logger_info '%s' $'\n' \
-            "Packages found on system that should still be removed. Forcibly" \
-            " removing them with rpm:"$'\n'
+        logger_info "Packages found on system that should still be removed. Forcibly removing them with rpm:"
         for pkg in "${check_removed[@]}"; do
             if [[ -z ${pkg} ]]; then
                 continue
@@ -737,10 +735,7 @@ EOF
         } | sort | uniq -u
     )
     if ((${#check_installed[@]})); then
-        logger_info '%s' $'\n' \
-            "Some required packages were not installed by dnf. Attempting to" \
-            " force with rpm:"$'\n'
-
+        logger_info "Some required packages were not installed by dnf. Attempting to force with rpm:"
         local -A rpm_map
         local -a file_list
         for rpm in /var/cache/dnf/{cloudosbaseos,cloudosappstream}-*/packages/*.rpm; do
@@ -772,7 +767,7 @@ EOF
         done
     fi
 
-    logger_info $'Ensuring repos are enabled before the package swap\n'
+    logger_info "Ensuring repos are enabled before the package swap."
     safednf -y --enableplugin=config_manager config-manager \
         --set-enabled "${!repo_map[@]}" || {
         printf '%s\n' 'Repo name missing?'
@@ -786,34 +781,33 @@ EOF
         )
 
         if ((${#managed_repos[@]})); then
-            logger_info $'\nDisabling subscription managed repos\n'
+            logger_info "Disabling subscription managed repos"
             safednf -y --enableplugin=config_manager config-manager \
                 --disable "${managed_repos[@]}"
         fi
     fi
 
     if ((${#disable_modules[@]})); then
-        logger_info $'Disabling modules\n\n'
+        logger_info "Disabling modules..."
         safednf -y module disable "${disable_modules[@]}" ||
             error_exit "Can't disable modules ${disable_modules[*]}"
     fi
 
     if ((${#enabled_modules[@]})); then
-        logger_info $'Enabling modules\n\n'
+        logger_info "Enabling modules..."
         safednf -y module enable "${enabled_modules[@]}" ||
             error_exit "Can't enable modules ${enabled_modules[*]}"
     fi
 
     # Make sure that excluded modules are disabled.
     if ((${#module_excludes[@]})); then
-        logger_info $'Disabling excluded modules\n\n'
+        logger_info "Disabling excluded modules..."
         safednf -y module disable "${module_excludes[@]}" ||
             error_exit "Can't disable modules ${module_excludes[*]}"
     fi
 
-    logger_info $'\nSyncing packages\n\n'
-    dnf -y --allowerasing distro-sync ||
-        error_exit "Error during distro-sync."
+    logger_info "Syncing packages..."
+    dnf -y --allowerasing distro-sync || error_exit "Error during distro-sync."
 
     if ((${#always_install[@]})); then
         safednf -y install "${always_install[@]}" || error_exit \
@@ -836,7 +830,7 @@ function efi_check() {
     fi
 }
 
-fix_efi() (
+function fix_efi() (
     grub2-mkconfig -o /boot/efi/EFI/opencloudos/grub.cfg ||
         error_exit "Error updating the grub config."
     for i in "${!efi_disk[@]}"; do
@@ -898,7 +892,7 @@ while getopts "huVR" option; do
         verify_all_rpms=true
         ;;
     *)
-        logger_error $'Invalid argument'
+        logger_error "Invalid argument"
         usage
         ;;
     esac
@@ -927,7 +921,7 @@ fi
 
 if [[ ${verify_all_rpms} && ${upgrade_to_oc9} ]]; then
     generate_rpm_info finish
-    logger_info $'You may review the following files:\n'
+    logger_info "You may review the following files:"
     printf '%s\n' "${upgrade_info_dir}/${HOSTNAME}-rpm-list-"*.log
 fi
 
@@ -938,6 +932,6 @@ fi
 printf '\n\n\n'
 
 if [[ ${upgrade_to_oc9} ]]; then
-    logger_info $'\nDone, please reboot your system.\n'
+    logger_info "Done, please reboot your system."
 fi
 finish_print
