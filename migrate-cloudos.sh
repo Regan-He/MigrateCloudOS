@@ -128,7 +128,7 @@ function finish_print() {
 
 function final_message() {
     logger_error "An error occurred while we were attempting to upgrade your system to" \
-        "OpenCloud OS 9. Your system may be unstable. Script will now exit to" \
+        "OpenCloudOS 9. Your system may be unstable. Script will now exit to" \
         "prevent possible damage."
     finish_print
 }
@@ -255,12 +255,12 @@ function pre_check() {
     fi
 }
 
-# 脚本所需的命令都在 OpenCloud OS 8 的最小安装中，所有必须的二进制都在 /bin 目录中
+# 脚本所需的命令都在 OpenCloudOS 8 的最小安装中，所有必须的二进制都在 /bin 目录中
 # 除非运行环境本身已经损坏，否则迁移脚本在这里不应该失败。
 function bin_check() {
-    # 仅支持升级 OpenCloud OS 8 到 OpenCloud OS 9
+    # 仅支持升级 OpenCloudOS 8 到 OpenCloudOS 9
     if [[ $(linux_dist_info PLATFORM_ID) != "platform:oc8" ]]; then
-        error_exit 'This script must be run on OpenCloud OS 8. Upgrade from other distributions is not supported.'
+        error_exit 'This script must be run on OpenCloudOS 8. Upgrade from other distributions is not supported.'
     fi
 
     local -a bins=(
@@ -470,22 +470,15 @@ function collect_system_info() {
     # 因此我们选择相对较小的软件包进行此操作。
     declare -g -A repo_map pkg_repo_map
     declare -g -a managed_repos
+
     pkg_repo_map=(
-        [baseos]=rootfiles.noarch
-        [appstream]=apr-util-ldap.${ARCH}
-        [highavailability]=pacemaker-doc.noarch
-        [crb]=python3-mpich.${ARCH}
-        [extras]=epel-release.noarch
+        [BaseOS]=rootfiles.noarch
+        [AppStream]=gcc.$ARCH
+        [Extras]=epel-release.noarch
     )
 
-    dist_id=$(linux_dist_info ID)
     PRETTY_NAME=$(linux_dist_info PRETTY_NAME)
     logger_info "Preparing to migrate ${PRETTY_NAME} to OpenCloudOS 9.0."
-
-    # 检查是否需要更改任何系统仓库的 repourl
-    local -A dist_repourl_map
-    dist_repourl_map=(
-    )
 
     # 我们需要列出启用的仓库
     local -a enabled_repos=()
@@ -493,28 +486,10 @@ function collect_system_info() {
     declare -g -a dist_repourl_swaps=()
     readarray -s 1 -t enabled_repos < <(dnf -q -y repolist --enabled)
     for r in "${enabled_repos[@]}"; do
-        enabled_repo_check[${r%% *}]=1
+        enabled_repo_check["${r%% *}"]=1
     done
 
-    # 最后设置一些 dnf 选项来替换这些仓库的 baseurl
-    local k
-    for k in "${!dist_repourl_map[@]}"; do
-        local d=${k%%:*} r=${k#*:}
-        if [[ ${d} != "${dist_id}" || ! ${enabled_repo_check[${r}]} ]]; then
-            continue
-        fi
-
-        dist_repourl_swaps+=(
-            "--setopt=${r}.mirrorlist="
-            "--setopt=${r}.metalink="
-            "--setopt=${r}.baseurl="
-            "--setopt=${r}.baseurl=${dist_repourl_map[${k}]}"
-        )
-
-        logger_info "Baseurl for ${r} is invalid, setting to ${dist_repourl_map[${k}]}."
-    done
-
-    logger_info "Determining repository names for ${PRETTY_NAME}"
+    logger_info "Determining repository names for $PRETTY_NAME"
 
     for r in "${!pkg_repo_map[@]}"; do
         printf '.'
@@ -523,6 +498,13 @@ function collect_system_info() {
         repo_map["${r}"]="${repoquery_results["Repository"]}"
     done
 
+    logger_info "Found the following repositories which map from $PRETTY_NAME to OpenCloudOS 9:"
+    column -t -s $'\t' -N "$PRETTY_NAME,OpenCloudOS 9" < <(
+        for r in "${!repo_map[@]}"; do
+            printf '%s\t%s\n' "${repo_map[$r]}" "$r"
+        done
+    )
+
     logger_info "Getting system package names for ${PRETTY_NAME}"
 
     # 我们不知道这些软件包的名称，我们必须通过各种方式来发现它们。
@@ -530,54 +512,40 @@ function collect_system_info() {
     # 在某些情况下，我们需要通过一些手段来获取特定源发行版提供的文件名。
     # 获取每个仓库的信息，以确定哪些是订阅管理的。
     for r in "${!repo_map[@]}"; do
+        # 如果repo映射中包含空串，那么忽略它
+        [[ ! "$r" ]] || continue
         repoinfo "${repo_map["${r}"]}" ||
             error_exit "Failed to fetch info for repository ${repo_map[${r}]}."
 
-        if [[ "${r}" == "baseos" ]]; then
-            local baseos_filename="system-release"
-            if [[ ! "${repoinfo_results["Repo-managed"]}" ]]; then
-                baseos_filename="${repoinfo_results["Repo-filename"]}"
-            fi
-            local baseos_gpgkey="${repoinfo_results["Repo-gpgkey"]}"
-        fi
         if [[ "${repoinfo_results["Repo-managed"]}" ]]; then
             managed_repos+=("${repo_map["${r}"]}")
         fi
     done
 
-    # 首先获取 baseos 仓库的信息，以确定我们是否需要更改 baseos 仓库的 repourl
-    repoinfo "${repo_map[baseos]}" ||
-        error_exit "Failed to fetch info for repository ${repo_map[baseos]}."
+    repoinfo "${repo_map[BaseOS]}" ||
+        error_exit "Failed to fetch info for repository ${repo_map[BaseOS]}."
 
-    # TODO:这里的映射影响后续升级产品标志包，造成了升级异常
     declare -g -A pkg_map provides_pkg_map
-    declare -g -a addl_provide_removes addl_pkg_removes
+    declare -g -a addl_pkg_removes
     provides_pkg_map=(
-        ["opencloudos-backgrounds"]=system-backgrounds
-        ["opencloudos-indexhtml"]=opencloudos-indexhtml
-        ["opencloudos-repos"]="${baseos_filename}"
-        ["opencloudos-logos"]=system-logos
-        ["opencloudos-logos-httpd"]=system-logos-httpd
-        ["opencloudos-logos-ipa"]=system-logos-ipa
-        ["opencloudos-gpg-keys"]="${baseos_gpgkey}"
-        ["opencloudos-release"]=system-release
+        ["opencloudos-backgrounds"]="system-backgrounds"
+        ["opencloudos-indexhtml"]="opencloudos-indexhtml"
+        ["opencloudos-logos"]="system-logos"
+        ["opencloudos-logos-httpd"]="system-logos-httpd"
+        ["opencloudos-release"]="system-release"
     )
 
+    # 找到系统包的映射
     for pkg in "${!provides_pkg_map[@]}"; do
         printf '.'
         prov="${provides_pkg_map["${pkg}"]}"
         pkg_map["${pkg}"]="$(provides_pkg "${prov}")" ||
             error_exit "Can't get package that provides ${prov}."
     done
-    for prov in "${addl_provide_removes[@]}"; do
-        printf '.'
-        local pkg
-        pkg=$(provides_pkg "${prov}") || continue
-        addl_pkg_removes+=("${pkg}")
-    done
 
     # shellcheck disable=SC2140
-    logger_info "Found the following system packages which map from ${PRETTY_NAME} to OpenCloud OS 9:"
+    logger_info "Found the following system packages which map from ${PRETTY_NAME} to OpenCloudOS 9:"
+    logger_info "Package in OpenCloudOS 9 - Package in ${PRETTY_NAME}"
     for p in "${!pkg_map[@]}"; do
         logger_info "${pkg_map[${p}]} - ${p}"
     done
@@ -592,14 +560,12 @@ function collect_system_info() {
         installed_pkg_check["${p}"]=1
     done
     for p in "${!pkg_map[@]}"; do
-        if [[ "${pkg_map["${p}"]}" && "${installed_pkg_check[${pkg_map[${p}]}]}" ]]; then
+        if [[ "${pkg_map[${p}]}" && "${installed_pkg_check[${pkg_map[${p}]}]}" ]]; then
             installed_pkg_map["${p}"]="${pkg_map["${p}"]}"
         fi
     done
-
     # shellcheck disable=SC2140
-    logger_info "We will replace the following ${PRETTY_NAME} packages with their OpenCloud OS 9"
-    # TODO:检查映射
+    logger_info "We will replace the following ${PRETTY_NAME} packages with their OpenCloudOS 9"
     for p in "${!installed_pkg_map[@]}"; do
         logger_info "${installed_pkg_map[${p}]} - ${p}"
     done
@@ -670,8 +636,9 @@ function generate_rpm_info() {
     # shellcheck disable=SC2140
     local rpm_info_fields="%{NAME}|%{VERSION}|%{RELEASE}|%{INSTALLTIME}|%{VENDOR}|"
     rpm_info_fields+="%{BUILDTIME}|%{BUILDHOST}|%{SOURCERPM}|%{LICENSE}|%{PACKAGER}"
-    rpm -qa --qf "${rpm_info_fields}\n" |
+    rpm -qa | xargs -P"$(nproc)" -I'{rpmf}' rpm -q --qf "${rpm_info_fields}\n" '{rpmf}' |
         sort >"${upgrade_info_dir}/${HOSTNAME}-rpm-list-${1}.log"
+
     logger_info "Verifying RPMs installed against RPM database: ${1}"
     rpm -Va | sort -k3 >"${upgrade_info_dir}/${HOSTNAME}-rpm-list-verified-${1}.log"
 }
@@ -819,7 +786,7 @@ function fix_efi() (
         error_exit "Error updating the grub config."
     for i in "${!efi_disk[@]}"; do
         efibootmgr -c -d "/dev/${efi_disk[${i}]}" -p "${efi_partition[${i}]}" \
-            -L "OpenCloud OS" -l "/EFI/opencloudos/shim${CPU_ARCH_SUFFIX_MAPPING[${ARCH}]}.efi" ||
+            -L "OpenCloudOS" -l "/EFI/opencloudos/shim${CPU_ARCH_SUFFIX_MAPPING[${ARCH}]}.efi" ||
             error_exit "Error updating uEFI firmware."
     done
 )
@@ -841,7 +808,7 @@ function establish_gpg_trust() {
 
     if ! cp -fv "${GPG_KEY_FILE}" "${gpg_key_file}"; then
         rm -rf "${gpg_tmp_dir}"
-        error_exit "Error getting the OpenCloud OS signing key."
+        error_exit "Error getting the OpenCloudOS signing key."
     fi
 
     if ! sha512sum --quiet -c <<<"${GPG_KEY_SHA512} ${gpg_key_file}"; then
@@ -856,7 +823,7 @@ function usage() {
         '' \
         'Options:' \
         '-h Display this help' \
-        '-u Upgrade to OpenCloud OS 9' \
+        '-u Upgrade to OpenCloudOS 9' \
         '-V Verify switch' \
         '   !! USE WITH CAUTION !!'
     exit 1
