@@ -152,9 +152,9 @@ declare -r GPG_KEY_SHA512="238c0f8cb3c22bfdedf6f4a7f9e3e86393101304465a442f8e359
 # 这里直接列出所有可用仓库的 URL
 declare -A repo_urls
 repo_urls=(
-    ["cloudosbaseos"]="https://mirrors.opencloudos.tech/opencloudos/9.0/BaseOS/${ARCH}/os/"
-    ["cloudosappstream"]="https://mirrors.opencloudos.tech/opencloudos/9.0/AppStream/${ARCH}/os/"
-    ["cloudosextras"]="https://mirrors.opencloudos.tech/opencloudos/9.0/extras/${ARCH}/os/"
+    ["cloudosbaseos"]="https://mirrors.opencloudos.tech/opencloudos/9/BaseOS/${ARCH}/os/"
+    ["cloudosappstream"]="https://mirrors.opencloudos.tech/opencloudos/9/AppStream/${ARCH}/os/"
+    ["cloudosextras"]="https://mirrors.opencloudos.tech/opencloudos/9/extras/${ARCH}/os/"
 )
 
 # 可能有一些需要额外安装的软件包，先声明一个数组对象，后续会按照检测情况进行填充
@@ -474,7 +474,6 @@ function collect_system_info() {
     pkg_repo_map=(
         [BaseOS]=rootfiles.noarch
         [AppStream]=gcc.$ARCH
-        [Extras]=epel-release.noarch
     )
 
     PRETTY_NAME=$(linux_dist_info PRETTY_NAME)
@@ -526,13 +525,15 @@ function collect_system_info() {
         error_exit "Failed to fetch info for repository ${repo_map[BaseOS]}."
 
     declare -g -A pkg_map provides_pkg_map
-    declare -g -a addl_pkg_removes
     provides_pkg_map=(
-        ["opencloudos-backgrounds"]="system-backgrounds"
-        ["opencloudos-indexhtml"]="opencloudos-indexhtml"
         ["opencloudos-logos"]="system-logos"
         ["opencloudos-logos-httpd"]="system-logos-httpd"
         ["opencloudos-release"]="system-release"
+    )
+
+    declare -g -a addl_pkg_removes
+    addl_pkg_removes=(
+        opencloudos-backgrounds opencloudos-indexhtml
     )
 
     # 找到系统包的映射
@@ -588,37 +589,13 @@ function collect_system_info() {
         set +e +o pipefail
     )
 
-    # 与已知的模块流进行比较，如果有不匹配的，则将其添加到 disable_modules 数组中
-    disable_modules=()
-    local i mod
-    for i in "${!enabled_modules[@]}"; do
-        mod="${enabled_modules[${i}]}"
-        if [[ "${mod}" != "${enabled_modules[${i}]}" ]]; then
-            disable_modules+=("${enabled_modules[${i}]}")
-            enabled_modules["${i}"]="${mod}"
-        fi
-    done
+    logger_info "Found the following modules is enabled: ${enabled_modules[*]}"
 
-    # 不启用的模块流
-    declare -g -a module_excludes
-    module_excludes=()
-    # 删除与任何被排除的模块相匹配的条目。
-    if ((${#module_excludes[@]})); then
-        printf '%s\n' '' "Excluding modules:" "${module_excludes[@]}"
-        local -A module_check='()'
-        local -a tmparr='()'
-        for m in "${module_excludes[@]}"; do
-            module_check[${m}]=1
-        done
-        for m in "${enabled_modules[@]}"; do
-            if [[ ! "${module_check["${m}"]}" ]]; then
-                tmparr+=("${m}")
-            fi
-        done
-        enabled_modules=("${tmparr[@]}")
-    fi
-
-    logger_info "Found the following modules to re-enable at completion: ${enabled_modules[*]}"
+    # OpenCloudOS 9不包含模块化，全部禁用
+    declare -g -a disable_modules=("${enabled_modules[@]}")
+    logger_info "In addition, the following modules will be disabled: ${disable_modules[*]}"
+    # 清空已启用模块清单
+    enabled_modules=()
 
     if ((${#managed_repos[@]})); then
         logger_info "In addition, since this system uses subscription-manager the following managed ""\
@@ -662,105 +639,40 @@ function package_swaps() {
         dnfparameters+=("--setopt=${repo}.gpgkey=file://${gpg_key_file}")
     done
 
-    safednf -y shell --disablerepo='*' --noautoremove \
+    if ((${#disable_modules[@]})); then
+        logger_info "Disabling modules..."
+        safednf -y module disable "${disable_modules[@]}" || error_exit "Can't disable modules ${disable_modules[*]}"
+        # 清除 /etc/dnf/modules.d
+        rm -rf /etc/dnf/modules.d/*
+    fi
+
+    safednf -y --disablerepo='*' --noautoremove \
         "${dist_repourl_swaps[@]}" \
         --setopt=protected_packages= --setopt=keepcache=True \
-        "${dnfparameters[@]}" \
-        <<EOF
-        remove ${installed_pkg_map[@]} ${addl_pkg_removes[@]}
-        install ${!installed_pkg_map[@]}
-        run
-        exit
-EOF
+        "${dnfparameters[@]}" remove "${installed_pkg_map[@]}" "${addl_pkg_removes[@]}" ||
+        error_exit "Failed to remove packages: ${installed_pkg_map[*]} ${addl_pkg_removes[*]}."
+
+    safednf -y --disablerepo='*' --noautoremove \
+        "${dist_repourl_swaps[@]}" \
+        --setopt=protected_packages= --setopt=keepcache=True \
+        "${dnfparameters[@]}" --nobest install "${!installed_pkg_map[@]}" ||
+        error_exit "Failed to install packages: ${!installed_pkg_map[*]}."
 
     # 新版本的 opencloudos-repos 已经安装，包含了我们预置的 GPG-KEY，现在可以删除临时文件
     rm -rf "${gpg_tmp_dir}"
 
-    local -a check_removed check_installed
-    readarray -t check_removed < <(
-        saferpm -qa --qf '%{NAME}\n' "${installed_pkg_map[@]}" \
-            "${addl_pkg_removes[@]}" | sort -u
-    )
-
-    if ((${#check_removed[@]})); then
-        logger_info "Packages found on system that should still be removed. Forcibly removing them with rpm:"
-        for pkg in "${check_removed[@]}"; do
-            if [[ -z "${pkg}" ]]; then
-                continue
-            fi
-            printf '%s\n' "${pkg}"
-            saferpm -e --allmatches --nodeps "${pkg}" ||
-                saferpm -e --allmatches --nodeps --noscripts --notriggers "${pkg}"
-        done
-    fi
-
-    readarray -t check_installed < <(
-        {
-            printf '%s\n' "${!installed_pkg_map[@]}" | sort -u
-            saferpm -qa --qf '%{NAME}\n' "${!installed_pkg_map[@]}" | sort -u
-        } | sort | uniq -u
-    )
-    if ((${#check_installed[@]})); then
-        logger_info "Some required packages were not installed by dnf. Attempting to force with rpm:"
-        local -A rpm_map
-        local -a file_list
-        for rpm in /var/cache/dnf/{cloudosbaseos,cloudosappstream}-*/packages/*.rpm; do
-            rpm_map["$(rpm -q --qf '%{NAME}\n' --nodigest "${rpm}" 2>/dev/null)"]="${rpm}"
-        done
-
-        # Attempt to install.
-        for pkg in "${check_installed[@]}"; do
-            printf '%s\n' "${pkg}"
-            if ! rpm -i --force --nodeps --nodigest "${rpm_map[${pkg}]}" 2>/dev/null; then
-                rpm -i --force --justdb --nodeps --nodigest "${rpm_map[${pkg}]}" 2>/dev/null
-
-                readarray -t file_list < <(
-                    rpm -V "${pkg}" 2>/dev/null | awk '$1!="missing" {print $2}'
-                )
-                for file in "${file_list[@]}"; do
-                    rmdir "${file}" || rm -f "${file}" || rm -rf "${file}"
-                done
-
-                rpm -i --reinstall --force --nodeps --nodigest "${rpm_map[${pkg}]}" 2>/dev/null
-            fi
-        done
-    fi
-
+    # 上面的命令没有出错，说明必须得有的软件包已经完成安装
     logger_info "Ensuring repos are enabled before the package swap."
     safednf -y --enableplugin=config_manager config-manager --set-enabled "${!repo_map[@]}" || {
-        printf '%s\n' 'Repo name missing?'
+        logger_error 'Repo name missing?'
         exit 25
     }
 
-    if ((${#managed_repos[@]})); then
-        readarray -t managed_repos < <(
-            safednf -y -q repolist "${managed_repos[@]}" | awk '$1!="repo" {print $1}'
-        )
+    # TODO 检查文件冲突包，然后记录下原来的包和升级之后的包名，使用rpm命令强行卸载当前的包，在升级之后，使用dnf再次安装冲突的包
+    local -a conflict_oc8 conflict_oc9
 
-        if ((${#managed_repos[@]})); then
-            logger_info "Disabling subscription managed repos"
-            safednf -y --enableplugin=config_manager config-manager --disable "${managed_repos[@]}"
-        fi
-    fi
-
-    if ((${#disable_modules[@]})); then
-        logger_info "Disabling modules..."
-        safednf -y module disable "${disable_modules[@]}" || error_exit "Can't disable modules ${disable_modules[*]}"
-    fi
-
-    if ((${#enabled_modules[@]})); then
-        logger_info "Enabling modules..."
-        safednf -y module enable "${enabled_modules[@]}" || error_exit "Can't enable modules ${enabled_modules[*]}"
-    fi
-
-    # Make sure that excluded modules are disabled.
-    if ((${#module_excludes[@]})); then
-        logger_info "Disabling excluded modules..."
-        safednf -y module disable "${module_excludes[@]}" || error_exit "Can't disable modules ${module_excludes[*]}"
-    fi
-
-    logger_info "Syncing packages..."
-    dnf -y --allowerasing distro-sync || error_exit "Error during distro-sync."
+    logger_info "Update system release..."
+    dnf -y --allowerasing upgrade || error_exit "Error during upgrade."
 
     if ((${#always_install[@]})); then
         safednf -y install "${always_install[@]}" || error_exit "Error installing required packages: ${always_install[*]}"
@@ -768,13 +680,13 @@ EOF
 }
 
 function efi_check() {
-    if ! [[ -d /sys/class/block ]]; then
+    if ! [[ -d "/sys/class/block" ]]; then
         error_exit "/sys is not accessible."
     fi
 
     if systemd-detect-virt --quiet --container; then
         declare -g CONTAINER_MACROS
-        CONTAINER_MACROS=$(mktemp /etc/rpm/macros.zXXXXXX)
+        CONTAINER_MACROS="$(mktemp "/etc/rpm/macros.zXXXXXX")"
         printf '%s\n' '%_netsharedpath /sys:/proc' >"${CONTAINER_MACROS}"
     elif [[ -d /sys/firmware/efi/ ]]; then
         declare -g update_efi=true
@@ -782,7 +694,7 @@ function efi_check() {
 }
 
 function fix_efi() (
-    grub2-mkconfig -o /boot/efi/EFI/opencloudos/grub.cfg ||
+    grub2-mkconfig -o "/boot/efi/EFI/opencloudos/grub.cfg" ||
         error_exit "Error updating the grub config."
     for i in "${!efi_disk[@]}"; do
         efibootmgr -c -d "/dev/${efi_disk[${i}]}" -p "${efi_partition[${i}]}" \
