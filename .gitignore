@@ -1,0 +1,6 @@
+migrate8to9.log
+migrate8to9.log*
+upgrade-info/*
+upgrade-logs/*
+docs/*.html
+docs/*.pdf
