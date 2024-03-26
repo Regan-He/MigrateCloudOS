@@ -41,16 +41,18 @@ Options:
 
    ```bash
    # 匹配RPM包生成报告，预升级，升级，检查RPM包生成报告
-   bash migrate-opencloudos.sh -mUuV
+   bash /root/MigrateCloudOS/migrate-opencloudos.sh -mUuV
    ```
 
-   > 全参数升级耗时较长，为了快速升级，可以仅运行 `bash migrate-opencloudos.sh -u`
+   > 全参数升级耗时较长，为了快速升级，可以仅运行 `bash migrate-opencloudos.sh -u` 即可完成升级。
 
-3. 等待系统升级完成，直到看到 `Done, please reboot your system.`。
+3. 等待系统升级完成，直到看到 `Done, please reboot your system.`；
+4. 执行`reboot`命令重启系统。
+5. 登录升级完成之后的 openCloudOS 9 系统。
 
 ## 文档
 
-设计原理及测试报告请查看[docs](./docs/ "./docs")。
+“<span style=color:blue>软件设计说明书</span>”及“<span style=color:blue>测试报告</span>”请查看 <span style=color:blue>docs</span> 目录。
 
 ```log
 .
@@ -58,15 +60,7 @@ Options:
 ├── docs
 │   ├── images
 │   │   ├── 01-oc8-setting-about.png
-│   │   ├── 02-oc8-pkg-count.png
-│   │   ├── 03-oc8-legacy-grub.png
-│   │   ├── 03-oc8-uefi-grub.png
-│   │   ├── 04-oc8-finish-upgrade1.png
-│   │   ├── 04-oc8-finish-upgrade2.png
-│   │   ├── 05-oc9-legacy-grub.png
-│   │   ├── 05-oc9-uefi-grub.png
-│   │   ├── 06-oc9-first-login.png
-│   │   ├── 07-oc9-setting-about.png
+│   │   ├── 0********.png
 │   │   └── 08-oc9-pkg-count.png
 │   ├── 测试报告.md
 │   └── 软件设计说明书.md

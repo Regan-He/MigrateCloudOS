@@ -924,6 +924,7 @@ function do_update() {
         # 执行版本同步，DNF 运行的错误日志保存在一个单独的文件中
         {
             if ((first_run)); then
+                _mark_continue
                 # 首次执行，仅做一个虚拟测试，以便于生成错误日志，用于替换包的分析
                 dnf --assumeno --releasever 9 distro-sync
             else
@@ -984,22 +985,31 @@ function do_update() {
     }
 
     function _circle_run() {
-        local -i first_run=${1:-0}
+        local -i circle_depth=$1
+        # 用于标记是否第一次运行，第一次运行与后续运行逻辑不同，主要在 _run_distro_sync 函数中
+        local -i first_run=$2
+        # 避免无限递归，在异常情况下，最多允许10次递归
+        ((circle_depth > 10)) && {
+            error_exit "Error: dnf distro-sync failed"
+        }
+
         # 然后解决文件冲突问题
         _run_distro_sync ${first_run}
-        # 清除继续处理的标记
-        _unmark_continue
+        if ! ((first_run)); then
+            # 清除继续处理的标记
+            _unmark_continue
+        fi
         # 处理报错
         _parse_dnf_problems
         _parse_dnf_conflicts
         # 如果标记为继续处理，则重新执行同步
         if ((continue_mark)); then
-            _circle_run
+            _circle_run $((circle_depth + 1)) 0
         fi
     }
 
     # 递归执行，直到没有文件冲突
-    _circle_run 1
+    _circle_run 1 1
     logger_debug "Total number of RPM packages in the current system: $(
         rpm -qa --qf='%{NAME}\n' | wc -l
     )"
