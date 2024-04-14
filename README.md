@@ -1,5 +1,7 @@
 # MigrateCloudOS
 
+![MigrateOpenCloudOS](./docs/images/MigrateOpenCloudOS.png)
+
 ## 用法说明
 
 > 必须使用 root 用户执行该工具。
