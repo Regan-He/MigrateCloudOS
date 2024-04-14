@@ -611,7 +611,7 @@ function collect_system_info() {
     collect_services_info
     # 收集系统关键组件配置信息
     collect_core_components_info
-    # 手机系统模块化信息
+    # 收集系统模块化信息
     collect_modules_info
 }
 
